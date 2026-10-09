@@ -2,9 +2,9 @@
 
 # Neo
 
-### A private, local-first personal agent workspace
+### Your private personal agent
 
-Chat, remember, organize, research, and get things done from one place.
+Chat naturally, remember what matters, organize your life, and get things done.
 
 **[Quick start](#quick-start) · [Architecture](#architecture) · [Configuration](#configuration) · [Security](#security)**
 
@@ -14,12 +14,13 @@ Chat, remember, organize, research, and get things done from one place.
 
 ## Overview
 
-Neo is a self-hosted personal agent built around one practical idea: it should be pleasant to
-talk to, but dependable when it acts. It keeps conversations, preferences, reminders, notes,
-links, tasks, and approvals in your own workspace.
+Neo is a self-hosted personal agent for conversations, reminders, notes, links, research, and
+tasks. It keeps useful context in your workspace so you can return to something later without
+starting from zero.
 
-It is not an automation free-for-all. Neo reads freely when allowed, but treats writes, sends,
-deletes, and other external actions as explicit, reviewable operations.
+Neo can search and read when allowed, but it asks before it writes, sends, deletes, or acts
+outside your workspace. The goal is a capable daily companion that stays understandable and under
+your control.
 
 ## Highlights
 
@@ -31,6 +32,21 @@ deletes, and other external actions as explicit, reviewable operations.
 - 🎙️ **Voice-ready** — browser speech input and spoken replies where Web Speech is available.
 - 🛡️ **Approval-first actions** — sensitive writes stay visible and require confirmation.
 - 🔌 **Expandable by design** — native tools and future MCP integrations share one tool registry.
+
+## Integrations
+
+| Integration | Status | What it is for |
+| --- | --- | --- |
+| 💬 Discord bot | Available | Search messages Neo can access and prepare/send approved replies. |
+| ✈️ Telegram account | Available | Search your authorised Telegram dialogs through Telethon. |
+| 🌐 Web research | Available | Search public web sources and bring the useful context back to chat. |
+| 🗂️ Obsidian | Available | Export Organizer notes and links as Markdown into a local vault. |
+| ✉️ Email | Planned | OAuth-based Gmail/IMAP read and approval-gated sending. |
+| 🖥️ Desktop control | Planned | Explicit, approval-gated local desktop actions. |
+| 🔌 MCP servers | In progress | Add new capabilities through a consistent tool and permission boundary. |
+
+Discord is intentionally **bot/OAuth only**. Neo does not support Discord self-bots or user-token
+automation. Telegram account access is opt-in and uses a local session file that must stay private.
 
 ## Architecture
 
