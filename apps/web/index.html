@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Neo</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css?v=20260923-media3" />
+    <link rel="stylesheet" href="mobile.css?v=20260923-chatcards1" />
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <button class="mobile-backdrop" id="mobile-backdrop" aria-label="Close panels"></button>
+      <aside class="sidebar" id="sidebar-panel">
+        <div class="brand"><span class="brand-mark">N</span><span>neo</span></div>
+        <button class="new-chat" id="new-chat"><i data-lucide="plus"></i> New conversation</button>
+        <button class="new-chat" id="organizer-button"><i data-lucide="bookmark"></i> Organizer</button>
+        <div class="nav-label">Conversations</div>
+        <nav class="conversation-list" id="conversation-list"><p class="sidebar-empty">No saved conversations yet.</p></nav>
+        <div class="side-bottom">
+          <div class="connection"><span id="connection-dot"></span><div><strong id="connection-label">Checking connection</strong><small id="connection-detail">Local gateway</small></div></div>
+          <button class="settings" id="settings-button">Settings <i data-lucide="settings-2"></i></button>
+        </div>
+      </aside>
+
+      <section class="chat-panel">
+        <header class="chat-header"><button class="mobile-panel-toggle" id="sidebar-toggle" aria-label="Open conversations"><i data-lucide="menu"></i></button><div class="header-title"><p class="eyebrow">PRIVATE WORKSPACE</p><h1 id="workspace-greeting">Good evening.</h1></div><div class="header-actions"><button class="header-button" id="clear-chat"><i data-lucide="trash-2"></i><span>Clear chat</span></button><button class="mobile-panel-toggle" id="context-toggle" aria-label="Open session details"><i data-lucide="panel-right-open"></i></button></div></header>
+        <div class="conversation" id="conversation">
+          <article class="message neo-message intro"><div class="avatar">N</div><div><p>I'm Neo. What would you like to take care of?</p><div class="suggestions"><button data-prompt="What do you remember about me?">What do you remember about me?</button><button data-prompt="Help me plan my day.">Plan my day</button><button data-prompt="What can you help me with?">What can you do?</button></div></div></article>
+        </div>
+        <footer class="composer-wrap"><form class="composer" id="chat-form"><textarea id="message-input" rows="1" placeholder="Message Neo" aria-label="Message Neo"></textarea><button id="voice-button" type="button" aria-label="Start voice input" title="Talk to Neo"><i data-lucide="mic"></i></button><button id="send-button" type="submit" aria-label="Send message"><i data-lucide="arrow-up"></i></button></form><p id="voice-hint">Press Enter to send · Shift+Enter for a new line</p></footer>
+      </section>
+
+      <aside class="context-panel" id="context-panel">
+        <section><div class="panel-heading"><span>Session</span><button id="refresh-status" aria-label="Refresh status"><i data-lucide="refresh-cw"></i></button></div><div class="status-card"><span class="pulse"></span><div><strong id="model-name">Connecting</strong><small id="model-detail">Provider unavailable</small></div></div></section>
+        <section><div class="panel-heading"><span>Memory</span><button id="add-memory" aria-label="Add memory"><i data-lucide="plus"></i></button></div><div class="memory-list" id="memory-list"><p class="empty">No saved personal facts.</p></div></section>
+        <section><div class="panel-heading"><span>Preferences</span><span class="count" id="preference-count">0</span></div><div class="memory-list" id="preferences-list"><p class="empty">No saved preferences.</p></div></section>
+        <section><div class="panel-heading"><span>Actions</span><span class="count" id="action-count">0</span></div><div id="actions-list"><p class="empty">No approval requests.</p></div></section>
+      </aside>
+    </main>
+    <dialog id="settings-dialog"><form method="dialog"><div class="dialog-head"><h2>Local connection</h2><button aria-label="Close"><i data-lucide="x"></i></button></div><label>Owner access key <input id="owner-key" type="password" autocomplete="off" placeholder="Only needed if configured" /></label><p>This stays only in this browser tab and is sent to your local Neo gateway.</p><button class="save-button" id="save-settings" value="save">Save settings</button></form></dialog>
+    <dialog id="memory-dialog"><form method="dialog"><div class="dialog-head"><h2>Save memory</h2><button aria-label="Close"><i data-lucide="x"></i></button></div><label>What should Neo remember?<textarea id="memory-input" rows="4" placeholder="e.g. I prefer concise answers."></textarea></label><button class="save-button" id="save-memory" value="save">Save memory</button></form></dialog>
+    <dialog id="organizer-dialog" aria-labelledby="organizer-title"><section class="organizer-workspace"><header class="dialog-head"><div><p class="eyebrow">PERSONAL WORKSPACE</p><h2 id="organizer-title">Organizer</h2></div><button class="dialog-close" value="close" aria-label="Close Organizer"><i data-lucide="x"></i></button></header><div class="organizer-layout"><aside class="organizer-sidebar"><div class="organizer-sidebar-head"><span>Collections</span><button id="new-organizer-group" type="button" title="New collection" aria-label="New collection"><i data-lucide="plus"></i></button></div><nav id="organizer-groups" aria-label="Organizer collections"></nav><form id="organizer-new-group" class="organizer-new-group" hidden><label for="organizer-group-name">Collection name</label><input id="organizer-group-name" placeholder="e.g. Shopping" maxlength="80" /><div><button type="submit" class="small-save">Create</button><button type="button" id="cancel-organizer-group" class="text-button">Cancel</button></div></form></aside><section class="organizer-main" id="organizer-view" aria-live="polite"></section></div><footer class="organizer-preference"><label>When Neo needs clarification <select id="clarification-style"><option value="Ask only when a missing detail changes the result.">Ask only when needed</option><option value="Ask a short question when uncertain.">Ask more often</option><option value="Make a reasonable assumption and say it briefly.">Make a reasonable assumption</option></select></label><button class="text-button" id="save-clarification" type="button">Save preference</button></footer></section></dialog>
+    <script src="app.js?v=20260923-actions4"></script>
+    <script src="organizer.js?v=20260923-organizer11"></script>
+  </body>
+</html>

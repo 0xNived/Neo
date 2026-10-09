@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neo-assistant"
+version = "0.1.0"
+description = "Safety-first, integration-aware personal assistant gateway"
+requires-python = ">=3.11"
+dependencies = [
+  "discord.py>=2.4,<3",
+  "telethon>=1.45,<2",
+  "httpx>=0.27,<1",
+  "aiosqlite>=0.20,<1",
+  "python-dotenv>=1,<2",
+]
+
+[project.optional-dependencies]
+api = ["fastapi>=0.115,<1", "uvicorn[standard]>=0.30,<1"]
+production = ["redis>=5,<7", "psycopg[binary]>=3.2,<4"]
+dev = ["pytest>=8,<9", "pytest-asyncio>=0.24,<1", "ruff>=0.8,<1"]
+voice = ["faster-whisper>=1.1,<2", "numpy>=1.26,<3", "sounddevice>=0.5,<1", "soundfile>=0.12,<1", "webrtcvad-wheels>=2.0.14,<3"]
+tunnel = ["pycloudflared>=0.3,<1"]
+
+[project.scripts]
+neo = "neo.__main__:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["neo*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
