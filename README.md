@@ -1,231 +1,222 @@
+<div align="center">
+
 # Neo
 
-Neo is a private, local-first assistant workspace. It combines chat, durable sessions,
-memory, reminders, web research, voice input/output, and an Organizer for notes, links,
-bookmarks, tasks, and diary-style records.
+### A private, local-first personal agent workspace
 
-```text
-web / voice / future channels
-            ↓
-FastAPI gateway → LLM provider → approved tools → PostgreSQL / integrations
-            ↓                        ↓
-     chat sessions + memory      reminder worker / background enrichment
-```
+Chat, remember, organize, research, and get things done from one place.
 
-Neo is safety-oriented: reads can run automatically; writes, external sends, and destructive
-changes are approval-gated. Organizer deletes are recoverable through Trash.
+**[Quick start](#quick-start) · [Architecture](#architecture) · [Configuration](#configuration) · [Security](#security)**
 
-## What works today
+</div>
 
-- Web chat with saved conversations and session continuity.
-- PostgreSQL-backed sessions, durable memories/preferences, reminders, approvals, and Organizer.
-- Organizer collections for notes, links, bookmarks, tasks, and diary entries.
-- Full-text Organizer search, link metadata extraction, optional local embeddings, and Obsidian export.
-- Browser voice input/output where the browser supports the Web Speech APIs.
-- LLM providers: Ollama, Groq, Cerebras, OpenRouter, and compatible OpenAI-style APIs.
-- Extensible tool registry for reminders, web research, Organizer, and future MCP/native integrations.
+---
 
-## Requirements
+## Overview
 
-- Python 3.11+.
-- PostgreSQL 15+ for the complete workspace. SQLite is a lightweight fallback only.
-- An LLM provider: Groq/OpenRouter/Cerebras or local Ollama.
-- Windows is the current primary development target.
+Neo is a self-hosted personal agent built around one practical idea: it should be pleasant to
+talk to, but dependable when it acts. It keeps conversations, preferences, reminders, notes,
+links, tasks, and approvals in your own workspace.
 
-## Quick start — Windows + PostgreSQL
+It is not an automation free-for-all. Neo reads freely when allowed, but treats writes, sends,
+deletes, and other external actions as explicit, reviewable operations.
 
-### 1. Create the virtual environment
+## Highlights
 
-```powershell
+- 💬 **Conversation that continues** — saved chat sessions with durable memories and preferences.
+- 🗂️ **Personal Organizer** — notes, bookmarks, links, task lists, and diary-style entries.
+- ⏰ **Reminders that persist** — a dedicated worker checks and delivers scheduled reminders.
+- 🔎 **Useful recall** — PostgreSQL full-text search, link enrichment, and optional local embeddings.
+- 🧠 **Bring your own model** — Ollama, Groq, OpenRouter, Cerebras, and compatible APIs.
+- 🎙️ **Voice-ready** — browser speech input and spoken replies where Web Speech is available.
+- 🛡️ **Approval-first actions** — sensitive writes stay visible and require confirmation.
+- 🔌 **Expandable by design** — native tools and future MCP integrations share one tool registry.
+
+## Architecture
+
+~~~text
+Web UI / Voice / Future channels
+              |
+              v
+      FastAPI agent gateway
+              |
+              +--> LLM provider --> bounded tool loop --> policy + approvals
+              |                                      |
+              v                                      v
+   sessions / memory / Organizer              integrations + research
+              |
+              v
+         PostgreSQL <---- reminder worker / background enrichment
+~~~
+
+PostgreSQL is Neo's source of truth. Semantic embeddings improve fuzzy recall for ordinary notes
+and links; exact records such as tasks, dates, IDs, and sensitive data use structured database
+lookups instead.
+
+## Quick start
+
+### Requirements
+
+- Python 3.11+
+- PostgreSQL 15+ recommended
+- One LLM provider, either cloud-hosted or local Ollama
+- Windows is the current primary development target
+
+### 1. Install Neo
+
+~~~powershell
 cd N:\Programming\neo
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -e ".[api,production,dev,voice,tunnel]"
-```
+~~~
 
-### 2. Configure Neo
+### 2. Create your local configuration
 
-```powershell
+~~~powershell
 Copy-Item .env.example .env
-```
+~~~
 
-Edit `.env`. At minimum, set PostgreSQL, your identity/time zone, and one LLM provider:
+Then configure PostgreSQL, your profile, and one model provider:
 
-```dotenv
+~~~dotenv
 DATABASE_URL=postgresql://postgres:YOUR_PASSWORD@127.0.0.1:5432/neo
-NEO_OWNER_NAME=Nived
+NEO_OWNER_NAME=YourName
 NEO_OWNER_TIMEZONE=Asia/Calcutta
 
-# Choose one provider.
 LLM_PROVIDER=groq
 GROQ_API_KEY=your_key_here
 GROQ_MODEL=openai/gpt-oss-20b
-```
+~~~
 
-Never commit `.env`. It is ignored by Git. A configured PostgreSQL database receives Neo's
-tables at startup, and Neo migrates legacy SQLite sessions/memories once.
+<code>.env</code> is deliberately ignored by Git. Never put keys, session files, or database exports
+in a public repository.
 
-### 3. Start the gateway
+### 3. Start the web gateway
 
-Use Neo's launcher on Windows; it configures the event loop needed by async PostgreSQL:
+Use Neo's launcher on Windows; it sets the event loop required by async PostgreSQL:
 
-```powershell
+~~~powershell
 $env:NEO_PORT = "8000"
 $env:NEO_RELOAD = "true" # use false for normal use
 .\.venv\Scripts\python.exe -m apps.api.run
-```
+~~~
 
-Open [http://127.0.0.1:8000](http://127.0.0.1:8000). Check its live configuration at
-[http://127.0.0.1:8000/v1/status](http://127.0.0.1:8000/v1/status).
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
-### 4. Start the worker in another terminal
+### 4. Start the worker
 
-The gateway creates reminders; this process claims and delivers due reminders and is the home for
-future retryable/background jobs.
+In a second terminal:
 
-```powershell
+~~~powershell
 cd N:\Programming\neo
 .\.venv\Scripts\Activate.ps1
 .\.venv\Scripts\python.exe -m apps.worker.main
-```
+~~~
 
-Leave both terminals running while using Neo.
+The gateway handles interactive chat. The worker handles durable reminder checks and future
+retryable/background jobs.
 
-## LLM providers
+## Configuration
 
-Use one provider at a time. `LLM_MODEL` overrides the provider-specific model variable.
+Choose one provider at a time. <code>LLM_MODEL</code> overrides the provider-specific model variable.
 
-| Provider | Required `.env` values |
+| Provider | Required environment variables |
 | --- | --- |
-| Groq | `LLM_PROVIDER=groq`, `GROQ_API_KEY`, `GROQ_MODEL` |
-| OpenRouter | `LLM_PROVIDER=openrouter`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` |
-| Cerebras | `LLM_PROVIDER=cerebras`, `CEREBRAS_API_KEY`, `CEREBRAS_MODEL` |
-| Ollama | `LLM_PROVIDER=ollama`, optionally `OLLAMA_BASE_URL`, `OLLAMA_MODEL` |
+| Groq | <code>LLM_PROVIDER=groq</code>, <code>GROQ_API_KEY</code>, <code>GROQ_MODEL</code> |
+| OpenRouter | <code>LLM_PROVIDER=openrouter</code>, <code>OPENROUTER_API_KEY</code>, <code>OPENROUTER_MODEL</code> |
+| Cerebras | <code>LLM_PROVIDER=cerebras</code>, <code>CEREBRAS_API_KEY</code>, <code>CEREBRAS_MODEL</code> |
+| Ollama | <code>LLM_PROVIDER=ollama</code>, <code>OLLAMA_MODEL</code>, optional <code>OLLAMA_BASE_URL</code> |
 
 ### Local Ollama
 
-```powershell
+~~~powershell
 ollama pull qwen2.5:3b-instruct
-```
+ollama pull nomic-embed-text # optional: local semantic Organizer search
+~~~
 
-```dotenv
+~~~dotenv
 LLM_PROVIDER=ollama
 OLLAMA_MODEL=qwen2.5:3b-instruct
 OLLAMA_BASE_URL=http://127.0.0.1:11434
-```
+~~~
 
-Optional local semantic indexing:
+## Use Neo
 
-```powershell
-ollama pull nomic-embed-text
-```
+| You want to... | Example |
+| --- | --- |
+| Set a reminder | “Remind me to call Sam tomorrow at 6 PM.” |
+| Save something | “Save this link in my project research notes.” |
+| Manage tasks | “Add buy cables to my shopping list.” |
+| Recall context | “What did I save about the VPS?” |
+| Research | “Search for today's news about local AI models.” |
+| Keep a record | “Save this as a diary entry for today.” |
 
-Embeddings enhance free-form link/note search. Exact facts—tasks, reminder times, IDs, and
-sensitive typed records—continue to use deterministic PostgreSQL queries.
+Neo asks a short follow-up when required information is missing or when multiple records could
+reasonably match. It should not ask you to repeat details it already knows.
 
-## Optional: use Neo from your phone
+## Phone and voice
 
-Start the gateway first, then run Cloudflare's quick tunnel in another terminal:
+### Phone access
 
-```powershell
+Run the gateway, then create a temporary Cloudflare tunnel:
+
+~~~powershell
 cloudflared tunnel --url http://127.0.0.1:8000
-```
+~~~
 
-Open the printed `trycloudflare.com` URL on your phone. Quick-tunnel URLs are temporary and can
-change after each restart. Create a named tunnel and protect Neo with authentication before
-exposing it beyond your own devices.
+Open the printed <code>trycloudflare.com</code> URL on your phone. Quick-tunnel URLs are temporary.
+Use a named, authenticated tunnel before exposing Neo beyond your own devices.
 
-## Voice
+### Voice
 
-The web microphone button uses your browser's speech-recognition API and reads Neo's reply aloud
-when supported. Chrome or Edge works best over `localhost` or HTTPS.
-
-1. Allow microphone permission.
-2. Tap the microphone, speak, then pause/stop.
-3. Neo sends the recognised text through the same gateway, session, policy, and approval flow.
-
-The Python `voice` extra installs dependencies for future local STT/TTS work; browser voice is
-the current default.
-
-## Everyday use
-
-- **Chat:** write normally. Neo asks a focused follow-up only if a required action detail is missing
-  or multiple targets are plausible.
-- **Approvals:** review write/delete/send actions in the Actions panel, then approve or decline.
-- **Reminders:** say what to remember and when: “Remind me to call Sam tomorrow at 6 PM.”
-- **Organizer:** create collections, save links/notes/tasks, check tasks off, and restore accidental
-  deletions from Trash.
-- **Links:** paste a public URL. Neo saves it fast, enriches it in the background, and later searches
-  the stored context when you ask about it.
+The web microphone button uses browser speech recognition and reads replies aloud when available.
+Chrome or Edge works best over localhost or HTTPS. Allow microphone permission, tap the mic, speak,
+and Neo sends the recognised text through the normal session and approval flow.
 
 ## Obsidian export
 
-Set an existing local vault path:
+Set a local vault path:
 
-```dotenv
+~~~dotenv
 OBSIDIAN_VAULT_PATH=C:\Users\you\Documents\NeoVault
-```
+~~~
 
-Then export:
+Export Organizer content to Markdown:
 
-```powershell
+~~~powershell
 Invoke-RestMethod -Method Post http://127.0.0.1:8000/v1/organizer/obsidian/export
-```
+~~~
 
-PostgreSQL remains canonical; Obsidian is an interoperable Markdown export, not a competing source
-of truth.
+Obsidian is an interoperable Markdown export. PostgreSQL remains the canonical workspace.
 
-## Project layout
+## Development
 
-```text
-apps/
-  api/                 FastAPI gateway and static web app
-  worker/              reminder/background worker
-src/neo/
-  brain/               LLM providers and prompt building
-  controller/          agent/tool loop and approval handling
-  integrations/        native capabilities and future MCP adapters
-  memory/              sessions, extraction, and persistence
-  organizer/           collections, search, enrichment, embeddings, Obsidian export
-  reminders/           reminder storage and scheduling
-  tools/               tool contracts, registry, execution
-  policies/            permissions and risk controls
-  voice/               STT/TTS/VAD boundaries
-docs/                  architecture and integration/security notes
-.agent/                project continuity notes for future Codex sessions
-tests/                 automated tests
-```
-
-## Development checks
-
-```powershell
+~~~powershell
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\ruff.exe check .
-```
+~~~
 
-See [architecture](docs/architecture.md), [adding an integration](docs/adding-an-integration.md),
-and [security](docs/security.md). The OSS architecture study is
-[.agent/memory/oss_reference_study.md](.agent/memory/oss_reference_study.md).
+Useful references:
 
-## Security and integration rules
+- [Architecture](docs/architecture.md)
+- [Adding an integration](docs/adding-an-integration.md)
+- [Security](docs/security.md)
 
-- Keep `.env`, Telegram session files, and databases private.
-- Never store passwords, API keys, seed phrases, or credentials in chat memory or Organizer notes.
-- Discord uses official bot/OAuth mode only; Discord self-bots/user-token automation are not supported.
-- A phone tunnel is public exposure: set a strong `NEO_OWNER_API_KEY` before sharing it.
-- Every integration must declare configuration, permissions/risk level, approval behavior,
-  logging/redaction, and tests.
+## Security
 
-## Git workflow
+- Keep <code>.env</code>, Telegram session files, and database backups private.
+- Never save passwords, API keys, seed phrases, or credentials in chat memory or Organizer notes.
+- External writes and deletes are approval-gated by default.
+- Organizer deletion is recoverable through Trash.
+- Discord uses official bot/OAuth mode only; user-token self-bots are not supported.
+- Use a strong <code>NEO_OWNER_API_KEY</code> before exposing Neo through a public tunnel.
 
-`main` is the deployable branch. Keep commits focused:
+---
 
-```text
-feat(organizer): add link metadata enrichment
-fix(reminders): validate natural-language due times
-docs: clarify local startup
-chore: add CI smoke test
-```
+<div align="center">
 
-The personal local workflow note at `.agent/GIT_WORKFLOW.local.md` is intentionally ignored.
+Built for a personal workspace, not a surveillance platform.
+
+</div>
