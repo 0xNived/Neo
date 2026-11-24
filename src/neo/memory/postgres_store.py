@@ -26,7 +26,28 @@ class PostgresMemoryStore:
                     "CREATE TABLE IF NOT EXISTS memories (id BIGSERIAL PRIMARY KEY, user_id TEXT NOT NULL, category TEXT NOT NULL, content TEXT NOT NULL, confidence REAL NOT NULL DEFAULT 0.7, created_at TIMESTAMPTZ NOT NULL, expires_at TIMESTAMPTZ, UNIQUE(user_id, category, content))"
                 )
                 await cur.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS memory_key TEXT")
+                await cur.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS source_kind TEXT NOT NULL DEFAULT 'owner'")
+                await cur.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS source_session_id TEXT")
+                await cur.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ")
+                await cur.execute("UPDATE memories SET updated_at=created_at WHERE updated_at IS NULL")
                 await cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS memories_owner_key_unique ON memories(user_id,category,memory_key) WHERE memory_key IS NOT NULL")
+                await cur.execute("CREATE INDEX IF NOT EXISTS memories_owner_category_idx ON memories(user_id,category,updated_at DESC)")
+                await cur.execute(
+                    "CREATE TABLE IF NOT EXISTS memory_events (id BIGSERIAL PRIMARY KEY,user_id TEXT NOT NULL,category TEXT NOT NULL,memory_key TEXT,content TEXT NOT NULL,action TEXT NOT NULL,source_kind TEXT NOT NULL,source_session_id TEXT,occurred_at TIMESTAMPTZ NOT NULL)"
+                )
+                await cur.execute(
+                    "CREATE INDEX IF NOT EXISTS memory_events_owner_lookup_idx ON memory_events(user_id,category,memory_key,occurred_at DESC)"
+                )
+                # Candidate rows are the durable, auditable first stage of
+                # memory.  They are deliberately separate from `memories`:
+                # an observation is not a profile fact until it has been
+                # validated and promoted.
+                await cur.execute(
+                    "CREATE TABLE IF NOT EXISTS memory_candidates (id TEXT PRIMARY KEY,user_id TEXT NOT NULL,source_session_id TEXT,source_message TEXT NOT NULL,kind TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'captured',extracted JSONB NOT NULL DEFAULT '[]'::jsonb,reason TEXT,created_at TIMESTAMPTZ NOT NULL,promoted_at TIMESTAMPTZ)"
+                )
+                await cur.execute(
+                    "CREATE INDEX IF NOT EXISTS memory_candidates_owner_status_idx ON memory_candidates(user_id,status,created_at DESC)"
+                )
                 await cur.execute(
                     "CREATE TABLE IF NOT EXISTS approvals (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, tool_name TEXT NOT NULL, payload JSONB NOT NULL, status TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL)"
                 )
@@ -66,21 +87,108 @@ class PostgresMemoryStore:
         ttl_days: int | None = None,
         confidence: float = 0.7,
         memory_key: str | None = None,
+        source_kind: str = "owner",
+        source_session_id: str | None = None,
     ) -> None:
         async with await self._connect() as db:
             async with db.cursor() as cur:
-                await cur.execute(
-                    "INSERT INTO memories(user_id,category,content,confidence,created_at,expires_at,memory_key) VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO UPDATE SET content=EXCLUDED.content,confidence=EXCLUDED.confidence,created_at=EXCLUDED.created_at,expires_at=EXCLUDED.expires_at,memory_key=EXCLUDED.memory_key",
-                    (
-                        user_id,
-                        category,
-                        content,
-                        max(0.0, min(confidence, 1.0)),
-                        datetime.now(UTC),
-                        self._expiry(category, ttl_days),
-                        memory_key,
-                    ),
+                if memory_key:
+                    await cur.execute(
+                        "SELECT 1 FROM memories WHERE user_id=%s AND category=%s AND memory_key=%s",
+                        (user_id, category, memory_key),
+                    )
+                else:
+                    await cur.execute(
+                        "SELECT 1 FROM memories WHERE user_id=%s AND category=%s AND content=%s",
+                        (user_id, category, content),
+                    )
+                action = "updated" if await cur.fetchone() else "created"
+                values = (
+                    user_id,
+                    category,
+                    content,
+                    max(0.0, min(confidence, 1.0)),
+                    datetime.now(UTC),
+                    self._expiry(category, ttl_days),
+                    memory_key,
+                    source_kind,
+                    source_session_id,
                 )
+                if memory_key:
+                    # This targets the partial unique index created in initialize().
+                    # PostgreSQL cannot infer a partial index from a bare ON CONFLICT.
+                    query = (
+                        "INSERT INTO memories(user_id,category,content,confidence,created_at,expires_at,memory_key,source_kind,source_session_id,updated_at) "
+                        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                        "ON CONFLICT(user_id,category,memory_key) WHERE memory_key IS NOT NULL "
+                        "DO UPDATE SET content=EXCLUDED.content,confidence=EXCLUDED.confidence,"
+                        "expires_at=EXCLUDED.expires_at,source_kind=EXCLUDED.source_kind,"
+                        "source_session_id=EXCLUDED.source_session_id,updated_at=EXCLUDED.updated_at"
+                    )
+                else:
+                    query = (
+                        "INSERT INTO memories(user_id,category,content,confidence,created_at,expires_at,memory_key,source_kind,source_session_id,updated_at) "
+                        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                        "ON CONFLICT(user_id,category,content) "
+                        "DO UPDATE SET confidence=GREATEST(memories.confidence,EXCLUDED.confidence),"
+                        "expires_at=EXCLUDED.expires_at,source_kind=EXCLUDED.source_kind,"
+                        "source_session_id=EXCLUDED.source_session_id,updated_at=EXCLUDED.updated_at"
+                    )
+                occurred_at = datetime.now(UTC)
+                await cur.execute(query, (*values, occurred_at))
+                await cur.execute(
+                    "INSERT INTO memory_events(user_id,category,memory_key,content,action,source_kind,source_session_id,occurred_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (user_id, category, memory_key, content, action, source_kind, source_session_id, occurred_at),
+                )
+
+    async def capture_candidate(
+        self,
+        user_id: str,
+        source_message: str,
+        *,
+        source_session_id: str | None = None,
+        kind: str = "owner_message",
+        extracted: list[dict] | None = None,
+        reason: str | None = None,
+    ) -> str:
+        """Persist a possible memory before any background consolidation.
+
+        This is provenance, not an automatic promise that the message has
+        become durable profile memory.
+        """
+        candidate_id = str(__import__("uuid").uuid4())
+        async with await self._connect() as db:
+            async with db.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO memory_candidates(id,user_id,source_session_id,source_message,kind,status,extracted,reason,created_at) VALUES(%s,%s,%s,%s,%s,'captured',%s,%s,%s)",
+                    (candidate_id, user_id, source_session_id, source_message[:4000], kind, json.dumps(extracted or []), reason, datetime.now(UTC)),
+                )
+        return candidate_id
+
+    async def mark_candidate_promoted(self, candidate_id: str) -> None:
+        async with await self._connect() as db:
+            async with db.cursor() as cur:
+                await cur.execute(
+                    "UPDATE memory_candidates SET status='promoted',promoted_at=%s WHERE id=%s",
+                    (datetime.now(UTC), candidate_id),
+                )
+
+    async def list_candidates(self, user_id: str, status: str = "captured", limit: int = 32) -> list[dict]:
+        async with await self._connect() as db:
+            async with db.cursor() as cur:
+                await cur.execute(
+                    "SELECT id,source_session_id,source_message,kind,status,extracted,reason,created_at,promoted_at FROM memory_candidates WHERE user_id=%s AND status=%s ORDER BY created_at ASC LIMIT %s",
+                    (user_id, status, limit),
+                )
+                rows = await cur.fetchall()
+        keys = ("id", "source_session_id", "source_message", "kind", "status", "extracted", "reason", "created_at", "promoted_at")
+        return [
+            {
+                key: (value.isoformat() if key.endswith("_at") and value else value)
+                for key, value in zip(keys, row, strict=True)
+            }
+            for row in rows
+        ]
 
     async def recall(self, user_id: str, query: str, limit: int = 6) -> list[str]:
         words = [word.lower() for word in query.split() if len(word) > 2]
@@ -114,14 +222,86 @@ class PostgresMemoryStore:
                 )
                 return [row[0] for row in await cur.fetchall()]
 
+    async def list_records(
+        self, user_id: str, categories: list[str] | None = None, limit: int = 24
+    ) -> list[dict]:
+        """Return compact, provenance-bearing records for profile/debug tooling."""
+        async with await self._connect() as db:
+            async with db.cursor() as cur:
+                await cur.execute(
+                    "DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < NOW()"
+                )
+                if categories:
+                    await cur.execute(
+                        "SELECT category,content,confidence,memory_key,source_kind,source_session_id,created_at,updated_at,expires_at "
+                        "FROM memories WHERE user_id=%s AND category = ANY(%s) "
+                        "ORDER BY confidence DESC,updated_at DESC LIMIT %s",
+                        (user_id, categories, limit),
+                    )
+                else:
+                    await cur.execute(
+                        "SELECT category,content,confidence,memory_key,source_kind,source_session_id,created_at,updated_at,expires_at "
+                        "FROM memories WHERE user_id=%s ORDER BY confidence DESC,updated_at DESC LIMIT %s",
+                        (user_id, limit),
+                    )
+                rows = await cur.fetchall()
+        keys = ("category", "content", "confidence", "memory_key", "source_kind", "source_session_id", "created_at", "updated_at", "expires_at")
+        return [
+            {key: value.isoformat() if key.endswith("_at") and value else value for key, value in zip(keys, row, strict=True)}
+            for row in rows
+        ]
+
+    async def list_history(
+        self,
+        user_id: str,
+        category: str | None = None,
+        memory_key: str | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Return immutable durable-memory write history for owner questions."""
+        conditions = ["user_id=%s"]
+        values: list[object] = [user_id]
+        if category:
+            conditions.append("category=%s")
+            values.append(category)
+        if memory_key:
+            conditions.append("memory_key=%s")
+            values.append(memory_key)
+        values.append(limit)
+        async with await self._connect() as db:
+            async with db.cursor() as cur:
+                await cur.execute(
+                    "SELECT category,memory_key,content,action,source_kind,source_session_id,occurred_at "
+                    "FROM memory_events WHERE " + " AND ".join(conditions) + " "
+                    "ORDER BY occurred_at DESC LIMIT %s",
+                    tuple(values),
+                )
+                rows = await cur.fetchall()
+        keys = ("category", "memory_key", "content", "action", "source_kind", "source_session_id", "occurred_at")
+        return [
+            {key: value.isoformat() if key == "occurred_at" and value else value for key, value in zip(keys, row, strict=True)}
+            for row in rows
+        ]
+
     async def forget(self, user_id: str, needle: str) -> int:
         async with await self._connect() as db:
             async with db.cursor() as cur:
                 await cur.execute(
+                    "SELECT category,memory_key,content,source_kind,source_session_id FROM memories WHERE user_id=%s AND content ILIKE %s",
+                    (user_id, f"%{needle}%"),
+                )
+                removed = await cur.fetchall()
+                await cur.execute(
                     "DELETE FROM memories WHERE user_id=%s AND content ILIKE %s",
                     (user_id, f"%{needle}%"),
                 )
-                return cur.rowcount
+                deleted_count = cur.rowcount
+                for category, memory_key, content, source_kind, source_session_id in removed:
+                    await cur.execute(
+                        "INSERT INTO memory_events(user_id,category,memory_key,content,action,source_kind,source_session_id,occurred_at) VALUES(%s,%s,%s,%s,'deleted',%s,%s,%s)",
+                        (user_id, category, memory_key, content, source_kind, source_session_id, datetime.now(UTC)),
+                    )
+                return deleted_count
 
     async def create_approval(
         self, approval_id: str, user_id: str, tool_name: str, payload: dict

@@ -17,8 +17,11 @@ class SqliteSessionStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.path) as db:
             await db.execute(
-                "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY,user_id TEXT NOT NULL,messages_json TEXT NOT NULL,references_json TEXT NOT NULL,updated_at TEXT NOT NULL)"
+                "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY,user_id TEXT NOT NULL,messages_json TEXT NOT NULL,references_json TEXT NOT NULL,title TEXT,updated_at TEXT NOT NULL)"
             )
+            columns = await (await db.execute("PRAGMA table_info(sessions)")).fetchall()
+            if "title" not in {column[1] for column in columns}:
+                await db.execute("ALTER TABLE sessions ADD COLUMN title TEXT")
             await db.commit()
 
     async def get_or_create(self, session_id: str, user_id: str) -> Session:
@@ -53,14 +56,14 @@ class SqliteSessionStore:
         async with aiosqlite.connect(self.path) as db:
             rows = await (
                 await db.execute(
-                    "SELECT id,messages_json,updated_at FROM sessions WHERE user_id=? ORDER BY updated_at DESC",
+                    "SELECT id,messages_json,title,updated_at FROM sessions WHERE user_id=? ORDER BY updated_at DESC",
                     (user_id,),
                 )
             ).fetchall()
         result = []
         for row in rows:
             messages = json.loads(row[1])
-            first_user = next(
+            fallback_title = next(
                 (
                     item.get("content", "")
                     for item in messages
@@ -69,9 +72,22 @@ class SqliteSessionStore:
                 "New conversation",
             )
             result.append(
-                {"id": row[0], "title": first_user[:52], "updated_at": row[2]}
+                {
+                    "id": row[0],
+                    "title": (row[2] or fallback_title).strip()[:80],
+                    "updated_at": row[3],
+                }
             )
         return result
+
+    async def rename(self, session_id: str, user_id: str, title: str) -> bool:
+        async with aiosqlite.connect(self.path) as db:
+            cursor = await db.execute(
+                "UPDATE sessions SET title=?,updated_at=? WHERE id=? AND user_id=?",
+                (title, datetime.now(UTC).isoformat(), session_id, user_id),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
 
     async def delete(self, session_id: str, user_id: str) -> bool:
         async with aiosqlite.connect(self.path) as db:

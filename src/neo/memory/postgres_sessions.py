@@ -20,7 +20,10 @@ class PostgresSessionStore:
         async with await self._connect() as db:
             async with db.cursor() as cur:
                 await cur.execute(
-                    "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY,user_id TEXT NOT NULL,messages_json JSONB NOT NULL,references_json JSONB NOT NULL,updated_at TIMESTAMPTZ NOT NULL)"
+                    "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY,user_id TEXT NOT NULL,messages_json JSONB NOT NULL,references_json JSONB NOT NULL,title TEXT,updated_at TIMESTAMPTZ NOT NULL)"
+                )
+                await cur.execute(
+                    "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title TEXT"
                 )
 
     async def get_or_create(self, session_id: str, user_id: str) -> Session:
@@ -57,14 +60,14 @@ class PostgresSessionStore:
         async with await self._connect() as db:
             async with db.cursor() as cur:
                 await cur.execute(
-                    "SELECT id,messages_json,updated_at FROM sessions WHERE user_id=%s ORDER BY updated_at DESC",
+                    "SELECT id,messages_json,title,updated_at FROM sessions WHERE user_id=%s ORDER BY updated_at DESC",
                     (user_id,),
                 )
                 rows = await cur.fetchall()
         result = []
-        for session_id, messages, updated_at in rows:
+        for session_id, messages, saved_title, updated_at in rows:
             messages = messages if isinstance(messages, list) else json.loads(messages)
-            title = next(
+            fallback_title = next(
                 (
                     item.get("content", "")
                     for item in messages
@@ -75,11 +78,20 @@ class PostgresSessionStore:
             result.append(
                 {
                     "id": session_id,
-                    "title": title[:52],
+                    "title": (saved_title or fallback_title).strip()[:80],
                     "updated_at": updated_at.isoformat(),
                 }
             )
         return result
+
+    async def rename(self, session_id: str, user_id: str, title: str) -> bool:
+        async with await self._connect() as db:
+            async with db.cursor() as cur:
+                await cur.execute(
+                    "UPDATE sessions SET title=%s,updated_at=%s WHERE id=%s AND user_id=%s",
+                    (title, datetime.now(UTC), session_id, user_id),
+                )
+                return cur.rowcount > 0
 
     async def delete(self, session_id: str, user_id: str) -> bool:
         async with await self._connect() as db:

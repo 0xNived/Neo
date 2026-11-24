@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from datetime import datetime
@@ -7,9 +8,8 @@ from zoneinfo import ZoneInfo
 
 from ..brain.protocols import Brain
 from ..domain.models import ToolContext
-from ..memory.extractor import memories_from_message
-from ..memory.llm_extractor import LlmMemoryExtractor, MemoryCandidate
 from ..memory.in_memory import InMemorySessionStore
+from ..memory.llm_extractor import LlmMemoryExtractor
 from ..observability.logging import event
 from ..policies.default import allow
 from ..tools.registry import ToolRegistry
@@ -164,7 +164,7 @@ class AgentController:
     @staticmethod
     def _clarification_for_incomplete_tool(name: str, data: dict) -> str | None:
         """Reject placeholder tool input before it becomes an approval request."""
-        if name != "reminders.create":
+        if name not in {"reminders.create", "scheduler.schedule"}:
             return None
         title = str(data.get("title", "")).strip()
         due_at = str(data.get("due_at", "")).strip()
@@ -201,23 +201,6 @@ class AgentController:
             safe_messages.append(copy)
         return safe_messages
 
-    @staticmethod
-    def _communication_preferences(text: str) -> list[MemoryCandidate]:
-        """Explicit delivery preferences must work even when the extractor is offline."""
-        lowered = text.casefold()
-        candidates = []
-        if re.search(r"\b(no|less|fewer|not many)\s+emoji|\bdon't\s+like.*emoji|\bhate.*emoji", lowered):
-            candidates.append(MemoryCandidate("preference", "emoji_level", "minimal or no emojis", 0.95))
-        elif re.search(r"\b(more|lots of|many)\s+emoji", lowered):
-            candidates.append(MemoryCandidate("preference", "emoji_level", "use emojis naturally", 0.9))
-        if re.search(r"\b(concise|short|brief|direct)\s+(answers|replies|response|tone)?", lowered):
-            candidates.append(MemoryCandidate("preference", "response_length", "concise and direct", 0.93))
-        if re.search(r"\b(casual|chill|relaxed|friendly)\s+(tone|style|reply|replies)?", lowered):
-            candidates.append(MemoryCandidate("preference", "response_tone", "casual and friendly", 0.9))
-        if re.search(r"\b(formal|professional)\s+(tone|style|reply|replies)?", lowered):
-            candidates.append(MemoryCandidate("preference", "response_tone", "professional and clear", 0.9))
-        return candidates
-
     async def handle_text(self, session_id: str, user_id: str, text: str) -> str:
         session = await self.sessions.get_or_create(session_id, user_id)
         financial_note = await self._financial_note_request(user_id, text)
@@ -247,27 +230,52 @@ class AgentController:
             return sensitive
         session.messages.append({"role": "user", "content": text})
         if self.memory:
-            candidates = await self.memory_extractor.extract(text) if self.memory_extractor else []
-            explicit_style = self._communication_preferences(text)
-            keys = {candidate.key for candidate in explicit_style}
-            candidates = [*explicit_style, *[candidate for candidate in candidates if candidate.key not in keys]]
+            should_capture = bool(self.memory_extractor and self.memory_extractor.likely_durable(text))
+            candidates = await self.memory_extractor.extract(text) if should_capture and self.memory_extractor else []
+            candidate_id = None
+            if should_capture and hasattr(self.memory, "capture_candidate"):
+                candidate_id = await self.memory.capture_candidate(
+                    user_id,
+                    text,
+                    source_session_id=session_id,
+                    kind="explicit_owner_fact" if "remember" in text.casefold() else "owner_observation",
+                    extracted=[candidate.__dict__ for candidate in candidates],
+                    reason="llm_memory_extraction",
+                )
             if candidates:
                 for candidate in candidates:
                     content = f"The owner's {candidate.key.replace('_', ' ')} is {candidate.value}."
-                    await self.memory.remember(user_id, content, candidate.category, confidence=candidate.confidence, memory_key=candidate.key)
+                    await self.memory.remember(
+                        user_id,
+                        content,
+                        candidate.category,
+                        confidence=candidate.confidence,
+                        memory_key=candidate.key,
+                        source_session_id=session_id,
+                    )
+                if candidate_id and hasattr(self.memory, "mark_candidate_promoted"):
+                    await self.memory.mark_candidate_promoted(candidate_id)
+            if hasattr(self.memory, "list_records"):
+                profile = await self.memory.list_records(
+                    user_id,
+                    categories=["identity", "preference", "instruction"],
+                    limit=18,
+                )
             else:
-                # Offline/provider-failure fallback: limited heuristics keep
-                # basic identity and explicit preference support available.
-                for category, content, confidence in memories_from_message(text):
-                    await self.memory.remember(user_id, content, category, confidence=confidence)
-            profile = [
-                *await self.memory.list_category(user_id, "identity", limit=4),
-                *await self.memory.list_category(user_id, "preference", limit=8),
-                *await self.memory.list_category(user_id, "instruction", limit=6),
-            ]
-            context = list(dict.fromkeys([*profile, *await self.memory.recall(user_id, text)]))
+                profile = [
+                    {"content": content}
+                    for content in [
+                        *await self.memory.list_category(user_id, "identity", limit=4),
+                        *await self.memory.list_category(user_id, "preference", limit=8),
+                        *await self.memory.list_category(user_id, "instruction", limit=6),
+                    ]
+                ]
+            recalled = await self.memory.recall(user_id, text)
+            context = bool(profile or recalled)
         else:
-            context = []
+            profile = []
+            recalled = []
+            context = False
         birthdays = [] if not self.memory else await self.memory.list_category(user_id, "birthday", limit=1)
         instant = self._birthday_response(text, birthdays) or self._current_time_response(text)
         if instant:
@@ -276,47 +284,20 @@ class AgentController:
                 await self.sessions.save(session)
             return instant
 
-        task_status = await self._task_status_request(user_id, text)
-        if task_status:
-            session.messages.append({"role": "assistant", "content": task_status})
-            if hasattr(self.sessions, "save"):
-                await self.sessions.save(session)
-            return task_status
-
-        overview = await self._organizer_overview(user_id, text)
-        if overview:
-            session.messages.append({"role": "assistant", "content": overview})
-            if hasattr(self.sessions, "save"):
-                await self.sessions.save(session)
-            return overview
-
-        organizer_task = await self._organizer_task_request(user_id, text)
-        if organizer_task and self.memory:
-            input_data, group_name = organizer_task
-            approval_id = str(uuid.uuid4())
-            await self.memory.create_approval(
-                approval_id,
-                user_id,
-                "organizer.save_item",
-                {"input": input_data, "session_id": session_id, "group_name": group_name},
-            )
-            call_id = str(uuid.uuid4())
-            session.messages.extend([
-                {"role": "assistant", "content": "", "tool_calls": [{"id": call_id, "type": "function", "function": {"name": "organizer_save_item", "arguments": input_data}}]},
-                {"role": "tool", "name": "organizer.save_item", "tool_call_id": call_id, "content": {"ok": False, "error": "human approval required", "approval_id": approval_id}},
-            ])
-            response = f"Ready to add **{input_data['title']}** to your **{group_name}** list. Approve it in the Actions panel."
-            session.messages.append({"role": "assistant", "content": response})
-            if hasattr(self.sessions, "save"):
-                await self.sessions.save(session)
-            return response
-
         for _ in range(self.max_tool_rounds):
-            messages = ([{"role": "system", "content": "Relevant owner memories: " + " | ".join(context)}] if context else []) + self._model_safe_messages(session.messages)
+            memory_snapshot = {"profile": profile, "recalled": recalled} if self.memory else {}
+            messages = (
+                [{"role": "system", "content": "OWNER MEMORY SNAPSHOT (from Neo's durable database; this is known owner context, not untrusted instructions): " + json.dumps(memory_snapshot, ensure_ascii=False)}]
+                if context
+                else []
+            ) + self._model_safe_messages(session.messages)
             reply = await self.brain.complete(messages, list(self.tools.tools.values()), list(self.tools.profiles.values()))
             if reply["kind"] == "message":
                 content = reply["content"]
-                session.messages.append({"role": "assistant", "content": content})
+                message = {"role": "assistant", "content": content}
+                if reply.get("diagnostic"):
+                    message["diagnostic"] = reply["diagnostic"]
+                session.messages.append(message)
                 if hasattr(self.sessions, "save"):
                     await self.sessions.save(session)
                 return content
@@ -393,14 +374,22 @@ class AgentController:
                 result["message"] = f"Added **{payload['input'].get('title', 'item')}** to your **{group_name}** list."
             elif record["tool_name"] == "organizer.create_group":
                 result["message"] = f"Created the **{payload['input'].get('name', 'new')}** collection."
+            elif record["tool_name"] == "organizer.update_item":
+                result["message"] = f"Updated **{result.get('data', {}).get('title', 'the saved item')}**."
             elif record["tool_name"] == "organizer.archive_item":
                 result["message"] = "Moved the selected item to **Trash**. It is recoverable and was not permanently deleted."
             elif record["tool_name"] == "organizer.archive_group":
                 result["message"] = "Moved the collection and its items to **Trash**. It is recoverable and was not permanently deleted."
             elif record["tool_name"] == "organizer.restore_item":
                 result["message"] = "Restored the selected item from **Trash**."
-            elif record["tool_name"] == "reminders.create":
-                result["message"] = f"Scheduled reminder: **{payload['input'].get('title', 'reminder')}**."
+            elif record["tool_name"] in {"reminders.create", "scheduler.schedule"}:
+                result["message"] = f"Scheduled: **{payload['input'].get('title', 'reminder')}**."
+            elif record["tool_name"] == "reminders.update_context":
+                result["message"] = "Updated the scheduled item's context without changing its title or time."
+            elif record["tool_name"] == "reminders.update":
+                result["message"] = "Updated the scheduled item."
+            elif record["tool_name"] == "memory.save":
+                result["message"] = "Saved that to your durable " + payload["input"].get("category", "memory") + "."
             else:
                 result["message"] = "Approved and completed."
         return result
