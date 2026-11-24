@@ -7,8 +7,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css?v=20260923-media3" />
-    <link rel="stylesheet" href="mobile.css?v=20260923-chatcards1" />
+    <link rel="stylesheet" href="styles.css?v=20261011-conversation-controls1" />
+    <link rel="stylesheet" href="mobile.css?v=20261011-conversation-controls1" />
+    <link rel="stylesheet" href="polish.css?v=20261011-conversation-controls1" />
     <script src="https://unpkg.com/lucide@latest"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
@@ -46,7 +47,7 @@
     <dialog id="settings-dialog"><form method="dialog"><div class="dialog-head"><h2>Local connection</h2><button aria-label="Close"><i data-lucide="x"></i></button></div><label>Owner access key <input id="owner-key" type="password" autocomplete="off" placeholder="Only needed if configured" /></label><p>This stays only in this browser tab and is sent to your local Neo gateway.</p><button class="save-button" id="save-settings" value="save">Save settings</button></form></dialog>
     <dialog id="memory-dialog"><form method="dialog"><div class="dialog-head"><h2>Save memory</h2><button aria-label="Close"><i data-lucide="x"></i></button></div><label>What should Neo remember?<textarea id="memory-input" rows="4" placeholder="e.g. I prefer concise answers."></textarea></label><button class="save-button" id="save-memory" value="save">Save memory</button></form></dialog>
     <dialog id="organizer-dialog" aria-labelledby="organizer-title"><section class="organizer-workspace"><header class="dialog-head"><div><p class="eyebrow">PERSONAL WORKSPACE</p><h2 id="organizer-title">Organizer</h2></div><button class="dialog-close" value="close" aria-label="Close Organizer"><i data-lucide="x"></i></button></header><div class="organizer-layout"><aside class="organizer-sidebar"><div class="organizer-sidebar-head"><span>Collections</span><button id="new-organizer-group" type="button" title="New collection" aria-label="New collection"><i data-lucide="plus"></i></button></div><nav id="organizer-groups" aria-label="Organizer collections"></nav><form id="organizer-new-group" class="organizer-new-group" hidden><label for="organizer-group-name">Collection name</label><input id="organizer-group-name" placeholder="e.g. Shopping" maxlength="80" /><div><button type="submit" class="small-save">Create</button><button type="button" id="cancel-organizer-group" class="text-button">Cancel</button></div></form></aside><section class="organizer-main" id="organizer-view" aria-live="polite"></section></div><footer class="organizer-preference"><label>When Neo needs clarification <select id="clarification-style"><option value="Ask only when a missing detail changes the result.">Ask only when needed</option><option value="Ask a short question when uncertain.">Ask more often</option><option value="Make a reasonable assumption and say it briefly.">Make a reasonable assumption</option></select></label><button class="text-button" id="save-clarification" type="button">Save preference</button></footer></section></dialog>
-    <script src="app.js?v=20260923-actions4"></script>
+    <script src="app.js?v=20261011-conversation-controls1"></script>
     <script src="organizer.js?v=20260923-organizer11"></script>
   </body>
 </html>

@@ -19,6 +19,12 @@
     const raw = window.marked?.parse(value || "") || esc(value);
     return window.DOMPurify?.sanitize(raw) || raw;
   };
+  const isHttp = (value) => { try { return ["http:", "https:"].includes(new URL(value).protocol); } catch { return false; } };
+  const parseReferences = (value) => value.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => {
+    const [type, reference, label = "", note = ""] = line.split("|").map((part) => part.trim());
+    if (!type || !reference) throw new Error("Each reference needs: type | URL or absolute path | label | context");
+    return { type, value: reference, label, note };
+  });
 
   const trashButton = document.createElement("button");
   trashButton.type = "button";
@@ -54,6 +60,14 @@
       ? `<button class="task-toggle" data-check-item="${item.id}" data-next-check="${!item.checked}" aria-label="${item.checked ? "Mark incomplete" : "Mark complete"}">${icon(item.checked ? "check-circle-2" : "circle")}</button>`
       : icon(item.kind === "bookmark" ? "link" : "file-text");
     const tags = Array.isArray(item.metadata?.tags) ? item.metadata.tags : [];
+    const references = Array.isArray(item.metadata?.references) ? item.metadata.references : [];
+    if (references.length) {
+      const renderedReferences = references.map((reference) => {
+        const target = isHttp(reference.value) ? `[${reference.label || reference.value}](${reference.value})` : `\`${reference.value}\``;
+        return `- ${reference.type}: ${target}${reference.note ? ` — ${reference.note}` : ""}`;
+      }).join("\n");
+      item.content = `${item.content || ""}\n\n### References\n${renderedReferences}`.trim();
+    }
     return `<article class="organizer-saved-item ${item.checked ? "is-checked" : ""}">${check}<div class="saved-item-body"><div class="item-title-row"><strong>${esc(item.title)}</strong><span class="item-kind">${esc(item.kind)}</span><button type="button" class="item-delete" data-delete-item="${item.id}" aria-label="Move ${esc(item.title)} to Trash" title="Move to Trash">${icon("trash-2")}</button></div>${item.summary ? `<p class="item-summary">${esc(item.summary)}</p>` : ""}${tags.length ? `<div class="item-tags">${tags.map((tag) => `<span>#${esc(tag)}</span>`).join("")}</div>` : ""}${item.content ? `<details class="item-details"><summary>Open full note</summary><div class="organizer-markdown">${markdown(item.content)}</div></details>` : ""}${item.url ? `<a href="${esc(item.url)}" target="_blank" rel="noreferrer">Open link</a>` : ""}<small class="item-meta">Saved ${when(item.created_at)}${item.updated_at !== item.created_at ? ` · Updated ${when(item.updated_at)}` : ""}</small></div></article>`;
   }
 
@@ -69,6 +83,24 @@
     view.querySelectorAll("[data-delete-item]").forEach((button) => button.addEventListener("click", async () => { if (!confirm("Move this item to Trash? You can restore it later.")) return; await request(`/organizer/items/${button.dataset.deleteItem}`, { method: "DELETE" }); await select(selected); }));
     view.querySelector("#delete-organizer-group").addEventListener("click", async () => { if (!confirm(`Archive “${group.name}” and its saved items? You can restore it from Trash.`)) return; await request(`/organizer/groups/${group.id}`, { method: "DELETE" }); selected = ""; await load(); });
     view.querySelector("#organizer-item-form").addEventListener("submit", async (event) => { event.preventDefault(); const kind = view.querySelector("#organizer-item-kind"); const title = view.querySelector("#organizer-title-input"); const content = view.querySelector("#organizer-content"); const url = view.querySelector("#organizer-url"); await request("/organizer/items", { method: "POST", body: JSON.stringify({ group_id: group.id, kind: kind.value, title: title.value, content: content.value, url: url.value.trim() || null }) }); await select(group.id); });
+    const form = view.querySelector("#organizer-item-form");
+    const referenceField = document.createElement("label");
+    referenceField.innerHTML = 'Context references <span>optional: type | URL or absolute path | label | context</span><textarea id="organizer-references" rows="3" placeholder="document | https://example.com/plan.pdf | Plan | Read before Friday&#10;local_path | N:\\Docs\\plan.pdf | Local plan | Source file"></textarea>';
+    form.insertBefore(referenceField, form.lastElementChild);
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const kind = view.querySelector("#organizer-item-kind");
+      const title = view.querySelector("#organizer-title-input");
+      const content = view.querySelector("#organizer-content");
+      const url = view.querySelector("#organizer-url");
+      try {
+        await request("/organizer/items", { method: "POST", body: JSON.stringify({ group_id: group.id, kind: kind.value, title: title.value, content: content.value, url: url.value.trim() || null, references: parseReferences(view.querySelector("#organizer-references").value) }) });
+        await select(group.id);
+      } catch (error) {
+        alert(error.message);
+      }
+    }, true);
     icons();
   }
 
