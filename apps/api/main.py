@@ -1,27 +1,38 @@
+import asyncio
 import json
+import logging
 import os
+import re
+import traceback
+import uuid
 from pathlib import Path
 
 import aiosqlite
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from neo.brain.providers import build_brain
 from neo.configuration.settings import load_settings
 from neo.controller.agent_controller import AgentController
 from neo.integrations import organizer as organizer_tools
+from neo.integrations.browser import BrowserService
+from neo.integrations.catalog import builtin_statuses
 from neo.integrations.web_research import WebResearchService
+from neo.link_previews import preview_url
+from neo.memory.llm_extractor import LlmMemoryExtractor
 from neo.memory.postgres_sessions import PostgresSessionStore
 from neo.memory.postgres_store import PostgresMemoryStore
-from neo.memory.llm_extractor import LlmMemoryExtractor
+from neo.memory.service import MemoryService
 from neo.memory.sqlite_sessions import SqliteSessionStore
 from neo.memory.sqlite_store import SqliteMemoryStore
-from neo.organizer.store import OrganizerStore
 from neo.organizer.obsidian import export_vault
+from neo.organizer.store import OrganizerStore
 from neo.reminders.postgres_store import PostgresReminderStore
-from neo.reminders.service import ReminderService
+from neo.reminders.runner import run_forever
+from neo.reminders.service import ReminderService, normalize_job_input
 from neo.reminders.store import SqliteReminderStore
 from neo.tools.registry import ToolRegistry
 
@@ -37,8 +48,11 @@ else:
     reminders = SqliteReminderStore(settings.database_path)
     organizer = None
 registry = ToolRegistry()
+MemoryService(memory).register(registry)
 ReminderService(reminders, settings.owner_timezone).register(registry)
 WebResearchService().register(registry)
+if settings.browser_enabled:
+    BrowserService(settings).register(registry)
 if organizer:
     organizer_tools.register(registry, organizer)
 normal_brain = build_brain(settings)
@@ -60,6 +74,40 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def safe_diagnostic_text(value: object) -> str:
+    text = str(value)
+    text = re.sub(r"(?i)bearer\s+[^\s,;]+", "Bearer [REDACTED]", text)
+    text = re.sub(
+        r"\b(?:sk|gsk|sk-or-v1)-[A-Za-z0-9_-]{12,}\b",
+        "[REDACTED_API_KEY]",
+        text,
+    )
+    return text[:12000]
+
+
+@app.exception_handler(Exception)
+async def unexpected_error(_request: Request, error: Exception):
+    reference = str(uuid.uuid4())
+    logging.getLogger("neo").exception("Unhandled gateway error [%s]", reference)
+    diagnostic = {
+        "source": "neo_gateway",
+        "reference": reference,
+        "error_type": type(error).__name__,
+        "message": safe_diagnostic_text(error),
+    }
+    if settings.environment == "development":
+        diagnostic["traceback"] = safe_diagnostic_text(
+            "".join(traceback.format_exception(error))
+        )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "Neo hit an internal gateway error.",
+            "diagnostic": diagnostic,
+        },
+    )
 
 @app.middleware("http")
 async def prevent_stale_frontend(request, call_next):
@@ -113,6 +161,30 @@ async def startup():
     if organizer:
         await organizer.initialize()
     await migrate_legacy_sqlite()
+    app.state.reminder_runner = asyncio.create_task(run_forever(reminders))
+    if organizer:
+        async def backfill_organizer_semantics() -> None:
+            try:
+                result = await organizer.backfill_semantic_index(settings.owner_name)
+                logging.getLogger("neo").info("Organizer semantic backfill: %s", result)
+            except Exception:
+                logging.getLogger("neo").warning(
+                    "Organizer semantic backfill skipped; lexical search remains available.",
+                    exc_info=True,
+                )
+
+        asyncio.create_task(backfill_organizer_semantics())
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    runner = getattr(app.state, "reminder_runner", None)
+    if runner:
+        runner.cancel()
+        try:
+            await runner
+        except asyncio.CancelledError:
+            pass
 
 
 def owner(key: str | None):
@@ -125,6 +197,10 @@ class Chat(BaseModel):
     text: str
 
 
+class SessionTitle(BaseModel):
+    title: str = Field(min_length=1, max_length=80)
+
+
 class Memory(BaseModel):
     content: str
     category: str = "semantic"
@@ -134,14 +210,35 @@ class Approval(BaseModel):
     approved: bool
 
 
+@app.get("/v1/previews")
+async def preview(url: str, x_neo_owner_key: str | None = Header(default=None)):
+    """Return safe Open Graph metadata for a public chat link."""
+    owner(x_neo_owner_key)
+    return await preview_url(url)
+
+
 class ReminderRequest(BaseModel):
     title: str
     due_at: str
+    kind: str = "notification"
+    body: str = ""
+    url: str | None = None
+    metadata: dict = Field(default_factory=dict)
+    schedule_type: str = "one_shot"
+    repeat_every_seconds: int | None = None
 
 class OrganizerGroup(BaseModel):
     name: str
     kind: str = "notes"
     parent_id: str | None = None
+
+
+class OrganizerReference(BaseModel):
+    type: str
+    value: str
+    label: str = ""
+    note: str = ""
+
 
 class OrganizerItem(BaseModel):
     group_id: str
@@ -149,18 +246,31 @@ class OrganizerItem(BaseModel):
     title: str
     content: str = ""
     url: str | None = None
-    metadata: dict = {}
+    metadata: dict = Field(default_factory=dict)
+    references: list[OrganizerReference] = Field(default_factory=list)
 
 
 @app.post("/v1/chat")
 async def chat(body: Chat, x_neo_owner_key: str | None = Header(default=None)):
     owner(x_neo_owner_key)
+    response = await controller.handle_text(
+        body.session_id,
+        settings.owner_name,
+        body.text,
+    )
+    session = await sessions.get_or_create(body.session_id, settings.owner_name)
+    last_assistant = next(
+        (
+            message
+            for message in reversed(session.messages)
+            if message.get("role") == "assistant"
+            and message.get("content") == response
+        ),
+        {},
+    )
     return {
-        "response": await controller.handle_text(
-            body.session_id,
-            settings.owner_name,
-            body.text,
-        )
+        "response": response,
+        "diagnostic": last_assistant.get("diagnostic"),
     }
 
 
@@ -208,7 +318,24 @@ async def create_reminder(
     body: ReminderRequest, x_neo_owner_key: str | None = Header(default=None)
 ):
     owner(x_neo_owner_key)
-    return await reminders.create(settings.owner_name, body.title, body.due_at)
+    try:
+        job = normalize_job_input(body.model_dump())
+        return await reminders.create(
+            settings.owner_name, body.title, body.due_at, **job
+        )
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+
+
+@app.post("/v1/reminders/{reminder_id}/acknowledge")
+async def acknowledge_reminder(
+    reminder_id: str, x_neo_owner_key: str | None = Header(default=None)
+):
+    owner(x_neo_owner_key)
+    acknowledged = await reminders.acknowledge(settings.owner_name, reminder_id)
+    if not acknowledged:
+        raise HTTPException(404, "Scheduled job is not ready or does not exist")
+    return {"ok": True}
 
 
 @app.get("/v1/sessions")
@@ -242,6 +369,22 @@ async def delete_session(
     }
 
 
+@app.patch("/v1/sessions/{session_id}")
+async def rename_session(
+    session_id: str,
+    body: SessionTitle,
+    x_neo_owner_key: str | None = Header(default=None),
+):
+    owner(x_neo_owner_key)
+    title = " ".join(body.title.split())
+    if not title:
+        raise HTTPException(422, "Conversation title cannot be empty")
+    renamed = await sessions.rename(session_id, settings.owner_name, title)
+    if not renamed:
+        raise HTTPException(404, "Conversation not found")
+    return {"ok": True, "title": title}
+
+
 @app.get("/v1/status")
 async def status(x_neo_owner_key: str | None = Header(default=None)):
     owner(x_neo_owner_key)
@@ -252,6 +395,13 @@ async def status(x_neo_owner_key: str | None = Header(default=None)):
         "tools": list(controller.tools.tools),
         "environment": settings.environment,
     }
+
+
+@app.get("/v1/integrations")
+async def integrations(x_neo_owner_key: str | None = Header(default=None)):
+    """Secret-free setup state for the settings UI and agent setup."""
+    owner(x_neo_owner_key)
+    return {"integrations": [item.public() for item in builtin_statuses(settings)]}
 
 def workspace():
     if not organizer:
@@ -289,7 +439,11 @@ async def restore_organizer_group(group_id: str, x_neo_owner_key: str | None = H
 @app.post("/v1/organizer/items")
 async def organizer_item(body: OrganizerItem, background_tasks: BackgroundTasks, x_neo_owner_key: str | None = Header(default=None)):
     owner(x_neo_owner_key)
-    item = await workspace().create_item(settings.owner_name, body.group_id, body.kind, body.title, body.content, body.url, body.metadata)
+    metadata = {
+        **body.metadata,
+        "references": [reference.model_dump() for reference in body.references],
+    }
+    item = await workspace().create_item(settings.owner_name, body.group_id, body.kind, body.title, body.content, body.url, metadata)
     background_tasks.add_task(workspace().index_item, settings.owner_name, item["id"])
     background_tasks.add_task(workspace().embed_item, settings.owner_name, item["id"])
     if body.url:

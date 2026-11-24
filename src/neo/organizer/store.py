@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import uuid
 from datetime import UTC, datetime
 
+import httpx
 import psycopg
-from .link_enrichment import fetch_page_context
+
 from .embeddings import embed
+from .link_enrichment import fetch_page_context
+from .references import normalize_references
 
 
 class OrganizerStore:
@@ -115,11 +119,75 @@ class OrganizerStore:
         keywords = list(dict.fromkeys(word for word in words if word not in stop_words))[:18]
         plain = re.sub(r"\s+", " ", re.sub(r"[#*_`>\[\]]", "", content)).strip()
         summary = (plain or title.strip())[:220]
-        metadata = {"schema_version": 1, "summary": summary, "tags": tags, "keywords": keywords, "links": links, "source": "organizer", "content_length": len(content), "has_url": bool(url), **(extra_metadata or {})}
+        provided_metadata = extra_metadata or {}
+        references = normalize_references(provided_metadata.get("references"))
+        safe_extra_metadata = {
+            key: value for key, value in provided_metadata.items() if key != "references"
+        }
+        metadata = {"schema_version": 1, "summary": summary, "tags": tags, "keywords": keywords, "links": links, "references": references, "source": "organizer", "content_length": len(content), "has_url": bool(url), **safe_extra_metadata}
         async with await self._connect() as db:
             async with db.cursor() as cur:
                 await cur.execute("INSERT INTO organizer_items(id,user_id,group_id,kind,title,content,url,metadata,summary,created_at,updated_at) SELECT %s,%s,id,%s,%s,%s,%s,%s,%s,%s,%s FROM organizer_groups WHERE id=%s AND user_id=%s",(item_id,user_id,kind,title.strip()[:160],content.strip()[:12000],url,json.dumps(metadata),summary,now,now,group_id,user_id))
         return {"id":item_id,"kind":kind,"title":title,"content":content,"url":url,"metadata":metadata,"summary":summary,"checked":False}
+
+    async def update_item(
+        self,
+        user_id: str,
+        item_id: str,
+        *,
+        title: str | None = None,
+        content: str | None = None,
+        append_context: str | None = None,
+        url: str | None = None,
+        clear_url: bool = False,
+        references: list[dict] | None = None,
+        replace_references: bool = False,
+        metadata: dict | None = None,
+    ) -> dict | None:
+        """Edit one existing item without replacing, archiving, or duplicating it.
+
+        `append_context` is intentionally distinct from `content`: chat can add
+        a note to an existing record without risking the current details.
+        References may hold public links, images, document URLs, or local file
+        paths. A local path stays a reference only; this method never reads it.
+        """
+        async with await self._connect() as db:
+            async with db.cursor() as cur:
+                await cur.execute(
+                    "SELECT kind,title,content,url,metadata,checked,created_at FROM organizer_items WHERE id=%s AND user_id=%s AND deleted_at IS NULL FOR UPDATE",
+                    (item_id, user_id),
+                )
+                row = await cur.fetchone()
+                if not row:
+                    return None
+                kind, old_title, old_content, old_url, old_metadata, checked, created_at = row
+                old_metadata = old_metadata if isinstance(old_metadata, dict) else json.loads(old_metadata)
+                next_title = (title.strip()[:160] if isinstance(title, str) and title.strip() else old_title)
+                next_content = content.strip()[:12000] if isinstance(content, str) else old_content
+                if isinstance(append_context, str) and append_context.strip():
+                    next_content = "\n\n".join(part for part in (next_content, append_context.strip()) if part)[:12000]
+                next_url = None if clear_url else (url.strip() if isinstance(url, str) and url.strip() else old_url)
+                combined = f"{next_title} {next_content}".strip()
+                tags = sorted(set(re.findall(r"(?<!\w)#([\w-]{2,40})", combined.lower())))
+                links = sorted(set(re.findall(r"\[\[([^\]]{1,120})\]\]", next_content)))
+                words = re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]{2,}", combined.lower())
+                stop_words = {"this", "that", "with", "from", "have", "your", "about", "would", "there", "here", "into", "then", "when", "what", "just", "some", "note"}
+                keywords = list(dict.fromkeys(word for word in words if word not in stop_words))[:18]
+                plain = re.sub(r"\s+", " ", re.sub(r"[#*_`>\[\]]", "", next_content)).strip()
+                summary = (plain or next_title)[:220]
+                next_metadata = dict(old_metadata)
+                if metadata:
+                    next_metadata.update({key: value for key, value in metadata.items() if key not in {"references", "summary", "tags", "keywords", "links"}})
+                if references is not None:
+                    reference_values = references if replace_references else [*old_metadata.get("references", []), *references]
+                    next_metadata["references"] = normalize_references(reference_values)
+                next_metadata.update({"schema_version": 1, "summary": summary, "tags": tags, "keywords": keywords, "links": links, "content_length": len(next_content), "has_url": bool(next_url)})
+                now = datetime.now(UTC)
+                await cur.execute(
+                    "UPDATE organizer_items SET title=%s,content=%s,url=%s,metadata=%s,summary=%s,updated_at=%s WHERE id=%s AND user_id=%s",
+                    (next_title, next_content, next_url, json.dumps(next_metadata), summary, now, item_id, user_id),
+                )
+        return {"id": item_id, "kind": kind, "title": next_title, "content": next_content, "url": next_url, "metadata": next_metadata, "summary": summary, "checked": checked, "created_at": created_at.isoformat(), "updated_at": now.isoformat()}
 
     async def enrich_link(self, user_id: str, item_id: str) -> None:
         """Fetch a public link after save; failures remain visible as metadata."""
@@ -154,7 +222,21 @@ class OrganizerStore:
                 row = await cur.fetchone()
                 if not row:
                     return
-                text = "\n".join(part for part in (row[0], row[1], row[2]) if part).strip()
+                metadata = row[3] if isinstance(row[3], dict) else json.loads(row[3])
+                reference_context = "\n".join(
+                    " ".join(
+                        part
+                        for part in (
+                            reference.get("type"),
+                            reference.get("label"),
+                            reference.get("note"),
+                        )
+                        if part
+                    )
+                    for reference in metadata.get("references", [])
+                    if isinstance(reference, dict)
+                )
+                text = "\n".join(part for part in (row[0], row[1], row[2], reference_context) if part).strip()
                 chunks = [text[pos:pos + 1600] for pos in range(0, len(text), 1400)] or [row[0]]
                 await cur.execute("DELETE FROM organizer_chunks WHERE item_id=%s", (item_id,))
                 for ordinal, chunk in enumerate(chunks):
@@ -174,18 +256,109 @@ class OrganizerStore:
                 for row, vector in zip(rows, vectors):
                     await cur.execute("UPDATE organizer_chunks SET embedding=%s WHERE id=%s", (json.dumps(vector), row[0]))
 
+    async def backfill_semantic_index(self, user_id: str, limit: int = 250) -> dict:
+        """Index existing Organizer content after semantic search is enabled.
+
+        The backfill is bounded and skips task/private-wallet material.  If
+        local Ollama is not available, text chunks remain indexed for FTS and
+        the method exits without making normal startup fail.
+        """
+        async with await self._connect() as db:
+            async with db.cursor() as cur:
+                await cur.execute(
+                    "SELECT i.id FROM organizer_items i JOIN organizer_groups g ON g.id=i.group_id "
+                    "WHERE i.user_id=%s AND i.deleted_at IS NULL AND g.deleted_at IS NULL "
+                    "AND i.kind!='task' AND lower(g.name) NOT LIKE '%%crypto%%' AND ("
+                    "NOT EXISTS (SELECT 1 FROM organizer_chunks c WHERE c.item_id=i.id) OR "
+                    "EXISTS (SELECT 1 FROM organizer_chunks c WHERE c.item_id=i.id AND c.embedding IS NULL)) "
+                    "ORDER BY i.updated_at DESC LIMIT %s",
+                    (user_id, limit),
+                )
+                item_ids = [row[0] for row in await cur.fetchall()]
+        indexed = 0
+        embedded = 0
+        for item_id in item_ids:
+            await self.index_item(user_id, item_id)
+            indexed += 1
+            try:
+                await self.embed_item(user_id, item_id)
+                embedded += 1
+            except (httpx.HTTPError, KeyError, TypeError, ValueError):
+                # Do not retry every record when the local embedding service
+                # is offline; a later startup or explicit save can retry.
+                break
+        return {"candidates": len(item_ids), "indexed": indexed, "embedded": embedded}
+
     async def search(self, user_id: str, query: str, limit: int = 12) -> list[dict]:
+        """Hybrid Organizer retrieval: Postgres FTS is always available; local
+        embeddings improve semantic matches when they have been indexed.
+
+        Vectors deliberately stay optional here.  Saved material remains
+        searchable on a small VPS or while Ollama is offline.
+        """
         query = query.strip()[:200]
         if not query:
             return []
         async with await self._connect() as db:
             async with db.cursor() as cur:
                 await cur.execute(
-                    "SELECT i.id,i.kind,i.title,i.content,i.url,i.metadata,i.checked,i.created_at,g.name,ts_rank(to_tsvector('simple',coalesce(i.title,'') || ' ' || coalesce(i.content,'')),websearch_to_tsquery('simple',%s)) AS score FROM organizer_items i JOIN organizer_groups g ON g.id=i.group_id WHERE i.user_id=%s AND i.deleted_at IS NULL AND g.deleted_at IS NULL AND to_tsvector('simple',coalesce(i.title,'') || ' ' || coalesce(i.content,'')) @@ websearch_to_tsquery('simple',%s) ORDER BY score DESC,i.updated_at DESC LIMIT %s",
-                    (query, user_id, query, limit),
+                    "SELECT i.id,i.kind,i.title,i.content,i.url,i.metadata,i.checked,i.created_at,i.updated_at,g.name,ts_rank(to_tsvector('simple',coalesce(i.title,'') || ' ' || coalesce(i.content,'')),websearch_to_tsquery('simple',%s)) AS score FROM organizer_items i JOIN organizer_groups g ON g.id=i.group_id WHERE i.user_id=%s AND i.deleted_at IS NULL AND g.deleted_at IS NULL AND to_tsvector('simple',coalesce(i.title,'') || ' ' || coalesce(i.content,'')) @@ websearch_to_tsquery('simple',%s) ORDER BY score DESC,i.updated_at DESC LIMIT %s",
+                    (query, user_id, query, max(limit * 3, 24)),
                 )
-                rows = await cur.fetchall()
-        return [{"id":r[0],"kind":r[1],"title":r[2],"content":r[3],"url":r[4],"metadata":r[5] if isinstance(r[5],dict) else json.loads(r[5]),"checked":r[6],"created_at":r[7].isoformat(),"group_name":r[8],"score":float(r[9])} for r in rows]
+                lexical_rows = await cur.fetchall()
+                await cur.execute(
+                    "SELECT c.item_id,c.embedding,i.id,i.kind,i.title,i.content,i.url,i.metadata,i.checked,i.created_at,i.updated_at,g.name "
+                    "FROM organizer_chunks c JOIN organizer_items i ON i.id=c.item_id "
+                    "JOIN organizer_groups g ON g.id=i.group_id "
+                    "WHERE i.user_id=%s AND i.deleted_at IS NULL AND g.deleted_at IS NULL "
+                    "AND c.embedding IS NOT NULL LIMIT 300",
+                    (user_id,),
+                )
+                vector_rows = await cur.fetchall()
+
+        def as_item(row: tuple, score: float = 0.0) -> dict:
+            return {
+                "id": row[0], "kind": row[1], "title": row[2], "content": row[3],
+                "url": row[4], "metadata": row[5] if isinstance(row[5], dict) else json.loads(row[5]),
+                "checked": row[6], "created_at": row[7].isoformat(), "updated_at": row[8].isoformat(),
+                "group_name": row[9], "lexical_score": score, "semantic_score": 0.0,
+            }
+
+        merged: dict[str, dict] = {}
+        maximum_lexical = max((float(row[10]) for row in lexical_rows), default=0.0)
+        for row in lexical_rows:
+            item = as_item(row, float(row[10]) / maximum_lexical if maximum_lexical else 0.0)
+            merged[item["id"]] = item
+
+        if vector_rows:
+            try:
+                query_vector = (await embed([query]))[0]
+            except Exception:
+                query_vector = []
+            if query_vector:
+                query_norm = math.sqrt(sum(value * value for value in query_vector))
+                for row in vector_rows:
+                    raw_vector = row[1] if isinstance(row[1], list) else json.loads(row[1])
+                    vector_norm = math.sqrt(sum(value * value for value in raw_vector))
+                    if not query_norm or not vector_norm:
+                        continue
+                    semantic = sum(a * b for a, b in zip(query_vector, raw_vector, strict=False)) / (query_norm * vector_norm)
+                    item_row = (row[2], *row[3:])
+                    item = merged.setdefault(item_row[0], as_item(item_row))
+                    item["semantic_score"] = max(item["semantic_score"], float(semantic))
+
+        now = datetime.now(UTC)
+        for item in merged.values():
+            semantic = max(0.0, item["semantic_score"])
+            lexical = item["lexical_score"]
+            if semantic and lexical:
+                base = (semantic * 0.58) + (lexical * 0.42)
+            else:
+                base = semantic or lexical
+            age_days = max(0.0, (now - datetime.fromisoformat(item["updated_at"])).total_seconds() / 86400)
+            recency = 0.85 + (0.15 * math.exp(-age_days / 120))
+            item["score"] = base * recency
+        return sorted(merged.values(), key=lambda item: item["score"], reverse=True)[:limit]
 
     async def records(self, user_id: str, record_type: str, network: str | None = None) -> list[dict]:
         async with await self._connect() as db:
