@@ -1,0 +1,15 @@
+# Local development process dashboard. Install mprocs once, then run `mprocs`.
+# It displays API and worker on the left; select one to inspect its live logs.
+proc_list_width: 28
+scrollback: 3000
+procs:
+  api:
+    shell:
+      $select: os
+      windows: "set NEO_RELOAD=true && .\\.venv\\Scripts\\python.exe -m apps.api.run"
+      $else: "NEO_RELOAD=true ./.venv/bin/python -m apps.api.run"
+  worker:
+    shell:
+      $select: os
+      windows: ".\\.venv\\Scripts\\python.exe -m apps.worker.main"
+      $else: "./.venv/bin/python -m apps.worker.main"

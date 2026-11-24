@@ -28,6 +28,7 @@ your control.
 - 🗂️ **Personal Organizer** — notes, bookmarks, links, task lists, and diary-style entries.
 - ⏰ **Reminders that persist** — a dedicated worker checks and delivers scheduled reminders.
 - 🔎 **Useful recall** — PostgreSQL full-text search, link enrichment, and optional local embeddings.
+- 🌐 **Rendered-page research** — optional isolated browser support for JavaScript-heavy public pages.
 - 🧠 **Bring your own model** — Ollama, Groq, OpenRouter, Cerebras, and compatible APIs.
 - 🎙️ **Voice-ready** — browser speech input and spoken replies where Web Speech is available.
 - 🛡️ **Approval-first actions** — sensitive writes stay visible and require confirmation.
@@ -40,6 +41,7 @@ your control.
 | 💬 Discord bot | Available | Search messages Neo can access and prepare/send approved replies. |
 | ✈️ Telegram account | Available | Search your authorised Telegram dialogs through Telethon. |
 | 🌐 Web research | Available | Search public web sources and bring the useful context back to chat. |
+| 🧭 Rendered web pages | Optional | Read JavaScript-heavy public pages in an isolated browser. |
 | 🗂️ Obsidian | Available | Export Organizer notes and links as Markdown into a local vault. |
 | ✉️ Email | Planned | OAuth-based Gmail/IMAP read and approval-gated sending. |
 | 🖥️ Desktop control | Planned | Explicit, approval-gated local desktop actions. |
@@ -134,6 +136,26 @@ cd N:\Programming\neo
 The gateway handles interactive chat. The worker handles durable reminder checks and future
 retryable/background jobs.
 
+### Optional: render JavaScript-heavy public pages
+
+Most links work through Neo's lightweight fetcher. Enable the browser only for sites whose useful
+content appears after JavaScript loads, such as a public product page. The browser is deliberately
+isolated: it has no signed-in cookies, never submits forms, and cannot reliably claim results that
+depend on your account, delivery pincode, or selected product variant.
+
+~~~powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[browser]"
+.\.venv\Scripts\python.exe -m playwright install chromium
+~~~
+
+Then add this to `.env` and restart the gateway:
+
+~~~dotenv
+NEO_BROWSER_ENABLED=true
+NEO_BROWSER_HEADLESS=true
+NEO_BROWSER_TIMEOUT_SECONDS=20
+~~~
+
 ## Configuration
 
 Choose one provider at a time. <code>LLM_MODEL</code> overrides the provider-specific model variable.
@@ -144,6 +166,24 @@ Choose one provider at a time. <code>LLM_MODEL</code> overrides the provider-spe
 | OpenRouter | <code>LLM_PROVIDER=openrouter</code>, <code>OPENROUTER_API_KEY</code>, <code>OPENROUTER_MODEL</code> |
 | Cerebras | <code>LLM_PROVIDER=cerebras</code>, <code>CEREBRAS_API_KEY</code>, <code>CEREBRAS_MODEL</code> |
 | Ollama | <code>LLM_PROVIDER=ollama</code>, <code>OLLAMA_MODEL</code>, optional <code>OLLAMA_BASE_URL</code> |
+| Any OpenAI-compatible endpoint | <code>LLM_PROVIDER=openai_compatible</code>, <code>LLM_BASE_URL</code>, <code>LLM_API_KEY</code>, <code>LLM_MODEL</code> |
+
+### Any OpenAI-compatible provider
+
+Neo has one portable OpenAI-compatible adapter. It works with services such as
+OpenAI, LiteLLM gateways, self-hosted compatible servers, and Codex Everywhere.
+Set <code>LLM_BASE_URL</code> to either its API base (ending in <code>/v1</code>) or
+its full <code>/v1/chat/completions</code> endpoint; Neo accepts both forms.
+Keep provider credentials in the ignored <code>.env</code> file, never in source code.
+
+~~~dotenv
+LLM_PROVIDER=openai_compatible
+LLM_BASE_URL=https://your-provider.example/v1
+LLM_API_KEY=your_key_here
+LLM_MODEL=provider-model-id
+# Optional when your provider supports it: low | medium | high | xhigh | max
+LLM_REASONING_EFFORT=low
+~~~
 
 ### Local Ollama
 
@@ -208,6 +248,21 @@ Invoke-RestMethod -Method Post http://127.0.0.1:8000/v1/organizer/obsidian/expor
 Obsidian is an interoperable Markdown export. PostgreSQL remains the canonical workspace.
 
 ## Development
+
+### One-command local dashboard
+
+Install [mprocs](https://github.com/pvolok/mprocs) once on your machine, then
+start Neo from the repository root:
+
+```powershell
+npm install --global mprocs
+.\.venv\Scripts\python.exe start.py
+```
+
+`mprocs` starts the API and background worker together. Use the up/down arrows
+in its left process list to select `api` or `worker`; the selected service's
+live console is shown on the right. `start.py` is the project launcher; it
+checks that `mprocs` is installed and then loads [`mprocs.yaml`](mprocs.yaml).
 
 ~~~powershell
 .\.venv\Scripts\python.exe -m pytest -q

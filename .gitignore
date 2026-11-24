@@ -11,3 +11,5 @@ __pycache__/
 *.session
 .agent/
 .agent/GIT_WORKFLOW.local.md
+# Local read-only copies of external agent projects used for architecture study.
+other-agents/
