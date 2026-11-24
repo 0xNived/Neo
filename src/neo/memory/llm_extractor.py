@@ -63,11 +63,16 @@ class LlmMemoryExtractor:
                 "my repo",
                 "my website",
                 "my portfolio",
+                "correct",
+                "that's right",
+                "thats right",
+                "you got it",
+                "exactly",
             )
         )
 
-    async def extract(self, text: str) -> list[MemoryCandidate]:
-        if not self.api_key or not self.likely_durable(text):
+    async def extract(self, text: str, context_messages: list[dict] | None = None) -> list[MemoryCandidate]:
+        if not self.api_key:
             return []
         base_urls = {
             "groq": "https://api.groq.com/openai/v1",
@@ -83,7 +88,15 @@ class LlmMemoryExtractor:
             else f"{base_url.rstrip('/')}/chat/completions"
         )
         prompt = (
-            "Extract only durable, useful owner memories from the user text. "
+            "Extract only durable, useful owner memories confirmed by the LATEST owner message. "
+            "Prior conversation is context for resolving references such as 'the first one' or "
+            "'yes'; it is not evidence that the owner endorsed an assistant guess. Never save "
+            "an assistant claim unless the latest owner message clearly confirms it. Do not "
+            "infer an identity or stronger preference than the owner actually stated. In particular, "
+            "do not use a favorite_* key unless the owner explicitly said it is a favorite; "
+            "confirming something they like only establishes that they like it. "
+            "If the owner asks for guesses about something they like and then confirms one, "
+            "save a preference for that topic with only the confirmed value. "
             'Return JSON only: {"memories":[{"category":"identity|preference|birthday|instruction",'
             '"key":"stable_snake_case_key","value":"short factual value","confidence":0.0}]}. '
             "Return an empty list for casual chat, transient feelings, guesses, secrets, financial "
@@ -96,7 +109,9 @@ class LlmMemoryExtractor:
             "promotional, answer personal questions naturally, or otherwise change its conversational "
             "behavior, save that as a category preference with one of the assistant_* keys. For a "
             "preference comparison, use a stable key such as travel_destination and the chosen value "
-            "only. Do not save a question about Neo's tastes as an owner preference unless it also "
+            "only. For a clearly confirmed suggestion, use a stable key for its topic and save "
+            "only the chosen value. Do not save a question "
+            "about Neo's tastes as an owner preference unless it also "
             "contains an explicit instruction for how Neo should behave."
         )
         try:
@@ -105,7 +120,10 @@ class LlmMemoryExtractor:
                     "model": self.model,
                     "messages": [
                         {"role": "system", "content": prompt},
-                        {"role": "user", "content": text},
+                        {"role": "user", "content": json.dumps({
+                            "prior_conversation": (context_messages or [])[-6:],
+                            "latest_owner_message": text,
+                        }, ensure_ascii=False)},
                     ],
                     "temperature": 0,
                 }
@@ -126,6 +144,13 @@ class LlmMemoryExtractor:
         except (httpx.HTTPError, KeyError, ValueError, json.JSONDecodeError):
             return []
         result = []
+        owner_words = " ".join(
+            [text, *(
+                str(message.get("content", ""))
+                for message in (context_messages or [])
+                if message.get("role") == "user"
+            )]
+        ).casefold()
         for item in payload.get("memories", []):
             if not isinstance(item, dict):
                 continue
@@ -144,5 +169,9 @@ class LlmMemoryExtractor:
                 and value
                 and 0.7 <= confidence <= 1
             ):
+                if key.startswith("favorite_") and "favorite" not in owner_words and "favourite" not in owner_words:
+                    if "like" not in owner_words and "love" not in owner_words:
+                        continue
+                    key = f"liked_{key.removeprefix('favorite_')}"
                 result.append(MemoryCandidate(category, key[:80], value[:240], confidence))
         return result[:3]

@@ -228,10 +228,32 @@ class AgentController:
             if hasattr(self.sessions, "save"):
                 await self.sessions.save(session)
             return sensitive
+        prior_messages = [
+            {"role": message["role"], "content": message["content"][:1200]}
+            for message in self._model_safe_messages(session.messages)
+            if message.get("role") in {"user", "assistant"}
+            and isinstance(message.get("content"), str)
+            and message["content"].strip()
+        ][-6:]
         session.messages.append({"role": "user", "content": text})
         if self.memory:
-            should_capture = bool(self.memory_extractor and self.memory_extractor.likely_durable(text))
-            candidates = await self.memory_extractor.extract(text) if should_capture and self.memory_extractor else []
+            contextual_confirmation = bool(
+                self.memory_extractor
+                and text.strip().casefold() in {"yes", "yup", "yeah", "right", "that's right"}
+                and any(
+                    message["role"] == "user"
+                    and self.memory_extractor.likely_durable(message["content"])
+                    for message in prior_messages
+                )
+            )
+            should_capture = bool(
+                self.memory_extractor
+                and (self.memory_extractor.likely_durable(text) or contextual_confirmation)
+            )
+            candidates = (
+                await self.memory_extractor.extract(text, prior_messages)
+                if should_capture and self.memory_extractor else []
+            )
             candidate_id = None
             if should_capture and hasattr(self.memory, "capture_candidate"):
                 candidate_id = await self.memory.capture_candidate(
@@ -239,6 +261,7 @@ class AgentController:
                     text,
                     source_session_id=session_id,
                     kind="explicit_owner_fact" if "remember" in text.casefold() else "owner_observation",
+                    context_messages=prior_messages,
                     extracted=[candidate.__dict__ for candidate in candidates],
                     reason="llm_memory_extraction",
                 )

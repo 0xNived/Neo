@@ -25,13 +25,13 @@ class MemoryConsolidator:
         inspected = 0
         for candidate in await self.store.list_candidates(user_id, limit=limit):
             inspected += 1
-            extracted = candidate.get("extracted") or []
-            if isinstance(extracted, str):
+            context_messages = candidate.get("context_messages") or []
+            if isinstance(context_messages, str):
                 try:
-                    extracted = json.loads(extracted)
+                    context_messages = json.loads(context_messages)
                 except json.JSONDecodeError:
-                    extracted = []
-            facts = await self.extractor.extract(candidate["source_message"])
+                    context_messages = []
+            facts = await self.extractor.extract(candidate["source_message"], context_messages)
             if not facts:
                 continue
             for fact in facts:

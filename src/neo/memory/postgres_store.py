@@ -43,8 +43,9 @@ class PostgresMemoryStore:
                 # an observation is not a profile fact until it has been
                 # validated and promoted.
                 await cur.execute(
-                    "CREATE TABLE IF NOT EXISTS memory_candidates (id TEXT PRIMARY KEY,user_id TEXT NOT NULL,source_session_id TEXT,source_message TEXT NOT NULL,kind TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'captured',extracted JSONB NOT NULL DEFAULT '[]'::jsonb,reason TEXT,created_at TIMESTAMPTZ NOT NULL,promoted_at TIMESTAMPTZ)"
+                    "CREATE TABLE IF NOT EXISTS memory_candidates (id TEXT PRIMARY KEY,user_id TEXT NOT NULL,source_session_id TEXT,source_message TEXT NOT NULL,context_messages JSONB NOT NULL DEFAULT '[]'::jsonb,kind TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'captured',extracted JSONB NOT NULL DEFAULT '[]'::jsonb,reason TEXT,created_at TIMESTAMPTZ NOT NULL,promoted_at TIMESTAMPTZ)"
                 )
+                await cur.execute("ALTER TABLE memory_candidates ADD COLUMN IF NOT EXISTS context_messages JSONB NOT NULL DEFAULT '[]'::jsonb")
                 await cur.execute(
                     "CREATE INDEX IF NOT EXISTS memory_candidates_owner_status_idx ON memory_candidates(user_id,status,created_at DESC)"
                 )
@@ -148,6 +149,7 @@ class PostgresMemoryStore:
         *,
         source_session_id: str | None = None,
         kind: str = "owner_message",
+        context_messages: list[dict] | None = None,
         extracted: list[dict] | None = None,
         reason: str | None = None,
     ) -> str:
@@ -160,8 +162,8 @@ class PostgresMemoryStore:
         async with await self._connect() as db:
             async with db.cursor() as cur:
                 await cur.execute(
-                    "INSERT INTO memory_candidates(id,user_id,source_session_id,source_message,kind,status,extracted,reason,created_at) VALUES(%s,%s,%s,%s,%s,'captured',%s,%s,%s)",
-                    (candidate_id, user_id, source_session_id, source_message[:4000], kind, json.dumps(extracted or []), reason, datetime.now(UTC)),
+                    "INSERT INTO memory_candidates(id,user_id,source_session_id,source_message,context_messages,kind,status,extracted,reason,created_at) VALUES(%s,%s,%s,%s,%s,%s,'captured',%s,%s,%s)",
+                    (candidate_id, user_id, source_session_id, source_message[:4000], json.dumps((context_messages or [])[-6:]), kind, json.dumps(extracted or []), reason, datetime.now(UTC)),
                 )
         return candidate_id
 
@@ -177,11 +179,11 @@ class PostgresMemoryStore:
         async with await self._connect() as db:
             async with db.cursor() as cur:
                 await cur.execute(
-                    "SELECT id,source_session_id,source_message,kind,status,extracted,reason,created_at,promoted_at FROM memory_candidates WHERE user_id=%s AND status=%s ORDER BY created_at ASC LIMIT %s",
+                    "SELECT id,source_session_id,source_message,context_messages,kind,status,extracted,reason,created_at,promoted_at FROM memory_candidates WHERE user_id=%s AND status=%s ORDER BY created_at ASC LIMIT %s",
                     (user_id, status, limit),
                 )
                 rows = await cur.fetchall()
-        keys = ("id", "source_session_id", "source_message", "kind", "status", "extracted", "reason", "created_at", "promoted_at")
+        keys = ("id", "source_session_id", "source_message", "context_messages", "kind", "status", "extracted", "reason", "created_at", "promoted_at")
         return [
             {
                 key: (value.isoformat() if key.endswith("_at") and value else value)
