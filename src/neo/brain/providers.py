@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import re
 from typing import Any
 
 import httpx
@@ -40,22 +42,51 @@ def parse_model_reply(content: object, tool_names: set[str]) -> dict[str, Any]:
         )
 
 
-def provider_error_reply(error: httpx.HTTPError) -> dict[str, Any]:
-    """External model failures must never take down the local chat gateway."""
-    if isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 429:
-        return {
-            "kind": "message",
-            "content": "The configured model is rate-limited right now. Try again in a moment, or switch Neo to another provider/model.",
-        }
-    if isinstance(error, httpx.HTTPStatusError):
-        return {
-            "kind": "message",
-            "content": "Neo's configured model provider is temporarily unavailable. Please try again shortly.",
-        }
-    return {
-        "kind": "message",
-        "content": "Neo couldn't reach the configured model provider. Check the provider connection and try again.",
+def _redact_diagnostic(text: str) -> str:
+    text = re.sub(r"(?i)bearer\s+[^\s,;]+", "Bearer [REDACTED]", text)
+    text = re.sub(
+        r"\b(?:sk|gsk|sk-or-v1)-[A-Za-z0-9_-]{12,}\b", "[REDACTED_API_KEY]", text
+    )
+    return text[:12000]
+
+
+def provider_error_reply(error: Exception, *, stage: str = "request") -> dict[str, Any]:
+    """Return an honest, copyable provider failure without leaking credentials."""
+    diagnostic: dict[str, Any] = {
+        "source": "model_provider",
+        "stage": stage,
+        "error_type": type(error).__name__,
+        "message": _redact_diagnostic(str(error)),
     }
+    if isinstance(error, httpx.HTTPStatusError):
+        response = error.response
+        diagnostic.update(
+            {
+                "status": response.status_code,
+                "reason": response.reason_phrase,
+                "url": str(response.request.url),
+                "request_id": response.headers.get("x-request-id")
+                or response.headers.get("cf-ray"),
+                "retry_after": response.headers.get("retry-after"),
+                "response_body": _redact_diagnostic(response.text),
+            }
+        )
+        content = (
+            f"The model provider returned HTTP {response.status_code} "
+            f"({response.reason_phrase or 'request failed'}). Open technical details below."
+        )
+    elif isinstance(error, httpx.TimeoutException):
+        content = "The model provider request timed out. Open technical details below."
+    elif isinstance(error, httpx.HTTPError):
+        content = (
+            "Neo could not reach the model provider. Open technical details below."
+        )
+    else:
+        content = "Neo received an invalid response from the model provider. Open technical details below."
+    logging.getLogger("neo").error(
+        "Model provider failure: %s", json.dumps(diagnostic, ensure_ascii=False)
+    )
+    return {"kind": "message", "content": content, "diagnostic": diagnostic}
 
 
 def provider_messages(
@@ -301,17 +332,35 @@ class OllamaBrain:
                 response.raise_for_status()
         except httpx.HTTPError as error:
             return provider_error_reply(error)
-        return parse_ollama_reply(response.json().get("message") or {}, tools)
+        try:
+            return parse_ollama_reply(response.json().get("message") or {}, tools)
+        except (KeyError, TypeError, ValueError) as error:
+            return provider_error_reply(error, stage="response_parsing")
 
 
 class OpenAICompatibleBrain:
-    def __init__(self, base_url: str, api_key: str, model: str, prompts: PromptBuilder):
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        model: str,
+        prompts: PromptBuilder,
+        reasoning_effort: str | None = None,
+    ):
         self.base_url, self.api_key, self.model, self.prompts = (
             base_url.rstrip("/"),
             api_key,
             model,
             prompts,
         )
+        self.reasoning_effort = reasoning_effort
+
+    @property
+    def chat_completions_url(self) -> str:
+        """Accept either an API base URL or the complete chat-completions URL."""
+        if self.base_url.endswith("/chat/completions"):
+            return self.base_url
+        return f"{self.base_url}/chat/completions"
 
     async def complete(
         self,
@@ -330,33 +379,39 @@ class OpenAICompatibleBrain:
         if tools:
             payload["tools"] = native_tools(tools)
             payload["tool_choice"] = "auto"
+        if self.reasoning_effort:
+            payload["reasoning_effort"] = self.reasoning_effort
         # Do not force JSON mode here.  Several OpenAI-compatible providers
         # (including the configured Groq model) reject it, while our tolerant
         # reply parser already handles normal text safely.
         try:
             async with httpx.AsyncClient(timeout=45) as client:
                 response = await client.post(
-                    f"{self.base_url}/chat/completions",
+                    self.chat_completions_url,
                     headers={"Authorization": f"Bearer {self.api_key}"},
                     json=payload,
                 )
                 if response.status_code == 429:
                     await asyncio.sleep(1)
                     response = await client.post(
-                        f"{self.base_url}/chat/completions",
+                        self.chat_completions_url,
                         headers={"Authorization": f"Bearer {self.api_key}"},
                         json=payload,
                     )
                 response.raise_for_status()
         except httpx.HTTPError as error:
             return provider_error_reply(error)
-        return parse_openai_reply(response.json()["choices"][0]["message"], tools)
+        try:
+            return parse_openai_reply(response.json()["choices"][0]["message"], tools)
+        except (IndexError, KeyError, TypeError, ValueError) as error:
+            return provider_error_reply(error, stage="response_parsing")
 
 
 def build_brain(settings, provider: str | None = None, model: str | None = None):
     prompts = PromptBuilder(settings.owner_name, settings.owner_timezone, Persona())
     provider = provider or settings.llm_provider
     model = model or settings.llm_model
+    reasoning_effort = getattr(settings, "llm_reasoning_effort", None)
     if provider == "ollama" and not model:
         model = os.getenv("OLLAMA_MODEL", "qwen2.5:3b-instruct")
     api_key = (
@@ -379,6 +434,7 @@ def build_brain(settings, provider: str | None = None, model: str | None = None)
             api_key or "",
             model,
             prompts,
+            reasoning_effort,
         )
     if provider == "cerebras":
         return OpenAICompatibleBrain(
@@ -386,6 +442,7 @@ def build_brain(settings, provider: str | None = None, model: str | None = None)
             api_key or "",
             model,
             prompts,
+            reasoning_effort,
         )
     if provider == "openrouter":
         return OpenAICompatibleBrain(
@@ -393,11 +450,16 @@ def build_brain(settings, provider: str | None = None, model: str | None = None)
             api_key or "",
             model,
             prompts,
+            reasoning_effort,
         )
-    if (
-        provider == "openai_compatible"
-        and settings.llm_base_url
-        and settings.llm_api_key
-    ):
-        return OpenAICompatibleBrain(settings.llm_base_url, api_key, model, prompts)
+    if provider in {"openai", "openai_compatible", "custom_openai", "custom"}:
+        if settings.llm_base_url and api_key and model:
+            return OpenAICompatibleBrain(
+                settings.llm_base_url,
+                api_key,
+                model,
+                prompts,
+                reasoning_effort,
+            )
+        return StubBrain()
     return StubBrain()

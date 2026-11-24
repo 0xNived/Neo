@@ -17,6 +17,7 @@ class Settings:
     max_tool_rounds: int
     allow_external_writes: bool
     discord_mode: str
+    discord_bot_token: str | None
     discord_guild_ids: list[str]
     telegram_api_id: int | None
     telegram_api_hash: str | None
@@ -31,6 +32,14 @@ class Settings:
     llm_model: str
     llm_base_url: str | None
     llm_api_key: str | None
+    llm_reasoning_effort: str | None
+    vision_provider: str | None
+    vision_model: str | None
+    vision_base_url: str | None
+    vision_api_key: str | None
+    browser_enabled: bool
+    browser_headless: bool
+    browser_timeout_seconds: int
 
 
 def load_settings() -> Settings:
@@ -42,7 +51,10 @@ def load_settings() -> Settings:
         )
     raw_id = os.getenv("TELEGRAM_API_ID")
     provider = os.getenv("LLM_PROVIDER", "stub").lower()
-    key = os.getenv(f"{provider.upper()}_API_KEY")
+    # LLM_API_KEY / LLM_BASE_URL are the portable path for any OpenAI-compatible
+    # endpoint (LiteLLM, a self-hosted gateway, Codex Everywhere, etc.).  Keep
+    # provider-specific variables as convenient aliases for built-in providers.
+    key = os.getenv("LLM_API_KEY") or os.getenv(f"{provider.upper()}_API_KEY")
     base = os.getenv("LLM_BASE_URL") or (
         os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         if provider == "ollama"
@@ -58,6 +70,7 @@ def load_settings() -> Settings:
         int(os.getenv("MAX_TOOL_ROUNDS", "8")),
         _flag(os.getenv("ALLOW_EXTERNAL_WRITES")),
         mode,
+        os.getenv("DISCORD_BOT_TOKEN") or None,
         [
             item.strip()
             for item in os.getenv("DISCORD_ALLOWED_GUILD_IDS", "").split(",")
@@ -76,4 +89,12 @@ def load_settings() -> Settings:
         model,
         base,
         key,
+        os.getenv("LLM_REASONING_EFFORT") or None,
+        os.getenv("VISION_PROVIDER") or None,
+        os.getenv("VISION_MODEL") or None,
+        os.getenv("VISION_BASE_URL") or None,
+        os.getenv("VISION_API_KEY") or None,
+        _flag(os.getenv("NEO_BROWSER_ENABLED")),
+        _flag(os.getenv("NEO_BROWSER_HEADLESS"), default=True),
+        max(5, int(os.getenv("NEO_BROWSER_TIMEOUT_SECONDS", "20"))),
     )

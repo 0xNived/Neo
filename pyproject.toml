@@ -21,6 +21,7 @@ production = ["redis>=5,<7", "psycopg[binary]>=3.2,<4"]
 dev = ["pytest>=8,<9", "pytest-asyncio>=0.24,<1", "ruff>=0.8,<1"]
 voice = ["faster-whisper>=1.1,<2", "numpy>=1.26,<3", "sounddevice>=0.5,<1", "soundfile>=0.12,<1", "webrtcvad-wheels>=2.0.14,<3"]
 tunnel = ["pycloudflared>=0.3,<1"]
+browser = ["playwright>=1.50,<2"]
 
 [project.scripts]
 neo = "neo.__main__:main"
