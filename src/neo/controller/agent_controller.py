@@ -254,6 +254,8 @@ class AgentController:
                 await self.memory_extractor.extract(text, prior_messages)
                 if should_capture and self.memory_extractor else []
             )
+            extraction_failed = candidates is None
+            candidates = candidates or []
             candidate_id = None
             if should_capture and hasattr(self.memory, "capture_candidate"):
                 candidate_id = await self.memory.capture_candidate(
@@ -263,7 +265,7 @@ class AgentController:
                     kind="explicit_owner_fact" if "remember" in text.casefold() else "owner_observation",
                     context_messages=prior_messages,
                     extracted=[candidate.__dict__ for candidate in candidates],
-                    reason="llm_memory_extraction",
+                    reason="llm_memory_extraction_failed" if extraction_failed else "llm_memory_extraction",
                 )
             if candidates:
                 for candidate in candidates:

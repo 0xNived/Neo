@@ -71,9 +71,10 @@ class LlmMemoryExtractor:
             )
         )
 
-    async def extract(self, text: str, context_messages: list[dict] | None = None) -> list[MemoryCandidate]:
+    async def extract(self, text: str, context_messages: list[dict] | None = None) -> list[MemoryCandidate] | None:
+        """Return facts, an empty list for no facts, or None when extraction failed."""
         if not self.api_key:
-            return []
+            return None
         base_urls = {
             "groq": "https://api.groq.com/openai/v1",
             "openrouter": "https://openrouter.ai/api/v1",
@@ -81,7 +82,7 @@ class LlmMemoryExtractor:
         }
         base_url = self.base_url or base_urls.get(self.provider)
         if not base_url:
-            return []
+            return None
         endpoint = (
             base_url.rstrip("/")
             if base_url.rstrip("/").endswith("/chat/completions")
@@ -136,13 +137,17 @@ class LlmMemoryExtractor:
                 )
                 response.raise_for_status()
             raw = response.json()["choices"][0]["message"].get("content", "")
+            if not isinstance(raw, str):
+                return None
             if raw.startswith("~~~"):
                 raw = raw.split("\n", 1)[-1].removesuffix("~~~").strip()
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[-1].removesuffix("```").strip()
             payload: dict[str, Any] = json.loads(raw)
-        except (httpx.HTTPError, KeyError, ValueError, json.JSONDecodeError):
-            return []
+            if not isinstance(payload, dict) or not isinstance(payload.get("memories"), list):
+                return None
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError):
+            return None
         result = []
         owner_words = " ".join(
             [text, *(

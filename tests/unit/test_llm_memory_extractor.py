@@ -1,6 +1,7 @@
 import json
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from neo.memory.llm_extractor import LlmMemoryExtractor
@@ -54,3 +55,41 @@ async def test_extractor_passes_prior_turns_but_requires_latest_owner_confirmati
     assert submitted["prior_conversation"][-1]["content"].startswith("My guesses")
     assert "Never save an assistant claim unless the latest owner message clearly confirms it" in sent["payload"]["messages"][0]["content"]
     assert [(fact.key, fact.value) for fact in facts] == [("liked_artist", "Skrillex")]
+
+
+@pytest.mark.asyncio
+async def test_empty_extraction_is_distinct_from_provider_failure(monkeypatch):
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def post(self, *_args, **_kwargs):
+            class Response:
+                def raise_for_status(self):
+                    pass
+
+                def json(self):
+                    return {"choices": [{"message": {"content": '{"memories": []}'}}]}
+
+            return Response()
+
+    settings = SimpleNamespace(
+        llm_provider="openai_compatible",
+        llm_model="test-model",
+        llm_api_key="test-key",
+        llm_base_url="https://example.test/v1",
+    )
+    monkeypatch.setattr("neo.memory.llm_extractor.httpx.AsyncClient", Client)
+    assert await LlmMemoryExtractor(settings).extract("hello") == []
+
+    async def failed_post(self, *_args, **_kwargs):
+        raise httpx.ReadTimeout("timed out")
+
+    monkeypatch.setattr(Client, "post", failed_post)
+    assert await LlmMemoryExtractor(settings).extract("hello") is None
