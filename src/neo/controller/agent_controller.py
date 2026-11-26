@@ -280,6 +280,8 @@ class AgentController:
                     )
                 if candidate_id and hasattr(self.memory, "mark_candidate_promoted"):
                     await self.memory.mark_candidate_promoted(candidate_id)
+            elif candidate_id and not extraction_failed and hasattr(self.memory, "mark_candidate_dismissed"):
+                await self.memory.mark_candidate_dismissed(candidate_id)
             if hasattr(self.memory, "list_records"):
                 profile = await self.memory.list_records(
                     user_id,

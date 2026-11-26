@@ -48,3 +48,23 @@ async def test_consolidator_reuses_captured_conversation_context(tmp_path):
     assert await store.list_category("nico", "preference") == [
         "The owner's music artist preference is Skrillex."
     ]
+
+
+@pytest.mark.asyncio
+async def test_consolidator_dismisses_empty_results_but_retries_failures(tmp_path):
+    class MixedExtractor:
+        async def extract(self, message, _context_messages):
+            return None if message == "provider failed" else []
+
+    store = SqliteMemoryStore(tmp_path / "neo.sqlite3", ttl_days=30)
+    await store.initialize()
+    await store.capture_candidate("nico", "casual conversation")
+    await store.capture_candidate("nico", "provider failed")
+
+    result = await MemoryConsolidator(store, MixedExtractor()).run_once("nico")
+
+    assert result == {"inspected": 2, "promoted": 0}
+    assert [row["source_message"] for row in await store.list_candidates("nico")] == [
+        "provider failed"
+    ]
+    assert len(await store.list_candidates("nico", status="dismissed")) == 1

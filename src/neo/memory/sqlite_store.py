@@ -80,6 +80,14 @@ class SqliteMemoryStore:
             await db.execute("UPDATE memory_candidates SET status='promoted',promoted_at=? WHERE id=?", (datetime.now(UTC).isoformat(), candidate_id))
             await db.commit()
 
+    async def mark_candidate_dismissed(self, candidate_id: str) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "UPDATE memory_candidates SET status='dismissed' WHERE id=? AND status='captured'",
+                (candidate_id,),
+            )
+            await db.commit()
+
     async def list_candidates(self, user_id: str, status: str = "captured", limit: int = 32) -> list[dict]:
         async with aiosqlite.connect(self.path) as db:
             rows = await (await db.execute("SELECT id,source_session_id,source_message,context_messages,kind,status,extracted,reason,created_at,promoted_at FROM memory_candidates WHERE user_id=? AND status=? ORDER BY created_at ASC LIMIT ?", (user_id, status, limit))).fetchall()

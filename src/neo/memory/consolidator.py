@@ -32,7 +32,10 @@ class MemoryConsolidator:
                 except json.JSONDecodeError:
                     context_messages = []
             facts = await self.extractor.extract(candidate["source_message"], context_messages)
+            if facts is None:
+                continue
             if not facts:
+                await self.store.mark_candidate_dismissed(candidate["id"])
                 continue
             for fact in facts:
                 await self.store.remember(

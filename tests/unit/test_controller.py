@@ -64,6 +64,7 @@ async def test_owner_confirmation_uses_previous_artist_suggestions(tmp_path):
 
     await controller.handle_text("s", "u", "Can you guess the kind of music I like?")
     assert await memory.list_category("u", "preference") == []
+    assert len(await memory.list_candidates("u", status="dismissed")) == 1
     await controller.handle_text("s", "u", "The first one is correct, Skrillex it is.")
 
     assert await memory.list_category("u", "preference") == [

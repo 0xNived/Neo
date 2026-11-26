@@ -175,6 +175,14 @@ class PostgresMemoryStore:
                     (datetime.now(UTC), candidate_id),
                 )
 
+    async def mark_candidate_dismissed(self, candidate_id: str) -> None:
+        async with await self._connect() as db:
+            async with db.cursor() as cur:
+                await cur.execute(
+                    "UPDATE memory_candidates SET status='dismissed' WHERE id=%s AND status='captured'",
+                    (candidate_id,),
+                )
+
     async def list_candidates(self, user_id: str, status: str = "captured", limit: int = 32) -> list[dict]:
         async with await self._connect() as db:
             async with db.cursor() as cur:
