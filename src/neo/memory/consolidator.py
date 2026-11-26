@@ -23,7 +23,7 @@ class MemoryConsolidator:
     async def run_once(self, user_id: str, limit: int = 16) -> dict[str, int]:
         promoted = 0
         inspected = 0
-        for candidate in await self.store.list_candidates(user_id, limit=limit):
+        for candidate in await self.store.list_candidates(user_id, limit=limit, ready_only=True):
             inspected += 1
             context_messages = candidate.get("context_messages") or []
             if isinstance(context_messages, str):
@@ -33,6 +33,7 @@ class MemoryConsolidator:
                     context_messages = []
             facts = await self.extractor.extract(candidate["source_message"], context_messages)
             if facts is None:
+                await self.store.defer_candidate(candidate["id"])
                 continue
             if not facts:
                 await self.store.mark_candidate_dismissed(candidate["id"])

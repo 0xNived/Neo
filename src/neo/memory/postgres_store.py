@@ -43,9 +43,10 @@ class PostgresMemoryStore:
                 # an observation is not a profile fact until it has been
                 # validated and promoted.
                 await cur.execute(
-                    "CREATE TABLE IF NOT EXISTS memory_candidates (id TEXT PRIMARY KEY,user_id TEXT NOT NULL,source_session_id TEXT,source_message TEXT NOT NULL,context_messages JSONB NOT NULL DEFAULT '[]'::jsonb,kind TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'captured',extracted JSONB NOT NULL DEFAULT '[]'::jsonb,reason TEXT,created_at TIMESTAMPTZ NOT NULL,promoted_at TIMESTAMPTZ)"
+                    "CREATE TABLE IF NOT EXISTS memory_candidates (id TEXT PRIMARY KEY,user_id TEXT NOT NULL,source_session_id TEXT,source_message TEXT NOT NULL,context_messages JSONB NOT NULL DEFAULT '[]'::jsonb,kind TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'captured',extracted JSONB NOT NULL DEFAULT '[]'::jsonb,reason TEXT,created_at TIMESTAMPTZ NOT NULL,promoted_at TIMESTAMPTZ,next_attempt_at TIMESTAMPTZ)"
                 )
                 await cur.execute("ALTER TABLE memory_candidates ADD COLUMN IF NOT EXISTS context_messages JSONB NOT NULL DEFAULT '[]'::jsonb")
+                await cur.execute("ALTER TABLE memory_candidates ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ")
                 await cur.execute(
                     "CREATE INDEX IF NOT EXISTS memory_candidates_owner_status_idx ON memory_candidates(user_id,status,created_at DESC)"
                 )
@@ -183,15 +184,25 @@ class PostgresMemoryStore:
                     (candidate_id,),
                 )
 
-    async def list_candidates(self, user_id: str, status: str = "captured", limit: int = 32) -> list[dict]:
+    async def defer_candidate(self, candidate_id: str) -> None:
         async with await self._connect() as db:
             async with db.cursor() as cur:
                 await cur.execute(
-                    "SELECT id,source_session_id,source_message,context_messages,kind,status,extracted,reason,created_at,promoted_at FROM memory_candidates WHERE user_id=%s AND status=%s ORDER BY created_at ASC LIMIT %s",
+                    "UPDATE memory_candidates SET next_attempt_at=NOW() + INTERVAL '5 minutes' WHERE id=%s AND status='captured'",
+                    (candidate_id,),
+                )
+
+    async def list_candidates(self, user_id: str, status: str = "captured", limit: int = 32, ready_only: bool = False) -> list[dict]:
+        async with await self._connect() as db:
+            async with db.cursor() as cur:
+                await cur.execute(
+                    "SELECT id,source_session_id,source_message,context_messages,kind,status,extracted,reason,created_at,promoted_at,next_attempt_at FROM memory_candidates WHERE user_id=%s AND status=%s "
+                    + ("AND (next_attempt_at IS NULL OR next_attempt_at<=NOW()) " if ready_only else "")
+                    + "ORDER BY created_at ASC LIMIT %s",
                     (user_id, status, limit),
                 )
                 rows = await cur.fetchall()
-        keys = ("id", "source_session_id", "source_message", "context_messages", "kind", "status", "extracted", "reason", "created_at", "promoted_at")
+        keys = ("id", "source_session_id", "source_message", "context_messages", "kind", "status", "extracted", "reason", "created_at", "promoted_at", "next_attempt_at")
         return [
             {
                 key: (value.isoformat() if key.endswith("_at") and value else value)

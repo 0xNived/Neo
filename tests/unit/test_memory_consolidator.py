@@ -68,3 +68,23 @@ async def test_consolidator_dismisses_empty_results_but_retries_failures(tmp_pat
         "provider failed"
     ]
     assert len(await store.list_candidates("nico", status="dismissed")) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_batch_defers_retries_so_new_candidates_are_inspected(tmp_path):
+    class FailedExtractor:
+        async def extract(self, _message, _context_messages):
+            return None
+
+    store = SqliteMemoryStore(tmp_path / "neo.sqlite3", ttl_days=30)
+    await store.initialize()
+    for number in range(3):
+        await store.capture_candidate("nico", f"candidate {number}")
+    worker = MemoryConsolidator(store, FailedExtractor())
+
+    first = await worker.run_once("nico", limit=2)
+    second = await worker.run_once("nico", limit=2)
+
+    assert first == {"inspected": 2, "promoted": 0}
+    assert second == {"inspected": 1, "promoted": 0}
+    assert all(row["next_attempt_at"] for row in await store.list_candidates("nico"))

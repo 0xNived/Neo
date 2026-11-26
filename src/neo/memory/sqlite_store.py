@@ -49,11 +49,13 @@ class SqliteMemoryStore:
                 "CREATE TABLE IF NOT EXISTS approvals (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, tool_name TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL)"
             )
             await db.execute(
-                "CREATE TABLE IF NOT EXISTS memory_candidates (id TEXT PRIMARY KEY,user_id TEXT NOT NULL,source_session_id TEXT,source_message TEXT NOT NULL,context_messages TEXT NOT NULL DEFAULT '[]',kind TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'captured',extracted TEXT NOT NULL DEFAULT '[]',reason TEXT,created_at TEXT NOT NULL,promoted_at TEXT)"
+                "CREATE TABLE IF NOT EXISTS memory_candidates (id TEXT PRIMARY KEY,user_id TEXT NOT NULL,source_session_id TEXT,source_message TEXT NOT NULL,context_messages TEXT NOT NULL DEFAULT '[]',kind TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'captured',extracted TEXT NOT NULL DEFAULT '[]',reason TEXT,created_at TEXT NOT NULL,promoted_at TEXT,next_attempt_at TEXT)"
             )
             columns = [row[1] for row in await (await db.execute("PRAGMA table_info(memory_candidates)")).fetchall()]
             if "context_messages" not in columns:
                 await db.execute("ALTER TABLE memory_candidates ADD COLUMN context_messages TEXT NOT NULL DEFAULT '[]'")
+            if "next_attempt_at" not in columns:
+                await db.execute("ALTER TABLE memory_candidates ADD COLUMN next_attempt_at TEXT")
             await db.execute(
                 "CREATE TABLE IF NOT EXISTS memory_events (id INTEGER PRIMARY KEY,user_id TEXT NOT NULL,category TEXT NOT NULL,memory_key TEXT,content TEXT NOT NULL,action TEXT NOT NULL,source_kind TEXT NOT NULL,source_session_id TEXT,occurred_at TEXT NOT NULL)"
             )
@@ -88,10 +90,24 @@ class SqliteMemoryStore:
             )
             await db.commit()
 
-    async def list_candidates(self, user_id: str, status: str = "captured", limit: int = 32) -> list[dict]:
+    async def defer_candidate(self, candidate_id: str) -> None:
         async with aiosqlite.connect(self.path) as db:
-            rows = await (await db.execute("SELECT id,source_session_id,source_message,context_messages,kind,status,extracted,reason,created_at,promoted_at FROM memory_candidates WHERE user_id=? AND status=? ORDER BY created_at ASC LIMIT ?", (user_id, status, limit))).fetchall()
-        keys = ("id", "source_session_id", "source_message", "context_messages", "kind", "status", "extracted", "reason", "created_at", "promoted_at")
+            await db.execute(
+                "UPDATE memory_candidates SET next_attempt_at=? WHERE id=? AND status='captured'",
+                ((datetime.now(UTC) + timedelta(minutes=5)).isoformat(), candidate_id),
+            )
+            await db.commit()
+
+    async def list_candidates(self, user_id: str, status: str = "captured", limit: int = 32, ready_only: bool = False) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            query = "SELECT id,source_session_id,source_message,context_messages,kind,status,extracted,reason,created_at,promoted_at,next_attempt_at FROM memory_candidates WHERE user_id=? AND status=? "
+            if ready_only:
+                query += "AND (next_attempt_at IS NULL OR next_attempt_at<=?) "
+                params = (user_id, status, datetime.now(UTC).isoformat(), limit)
+            else:
+                params = (user_id, status, limit)
+            rows = await (await db.execute(query + "ORDER BY created_at ASC LIMIT ?", params)).fetchall()
+        keys = ("id", "source_session_id", "source_message", "context_messages", "kind", "status", "extracted", "reason", "created_at", "promoted_at", "next_attempt_at")
         return [dict(zip(keys, row, strict=True)) for row in rows]
 
     async def remember(
