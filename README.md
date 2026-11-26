@@ -71,6 +71,24 @@ PostgreSQL is Neo's source of truth. Semantic embeddings improve fuzzy recall fo
 and links; exact records such as tasks, dates, IDs, and sensitive data use structured database
 lookups instead.
 
+### How memory is saved
+
+Neo keeps conversation history separate from durable owner memory. A quick phrase check selects
+messages that may contain a lasting fact or a confirmation. For those messages, a small extraction
+pass sees the latest owner message and up to six earlier conversational turns. Earlier assistant
+guesses help resolve phrases such as “the first one,” but only the owner's confirmation can establish
+a fact. Valid facts are saved with a category, stable key, confidence, and source session.
+
+An extraction that finds no fact is dismissed. If the model provider fails or times out, the candidate
+stays available for the worker to retry; a failed attempt is deferred for five minutes so it cannot
+keep newer candidates waiting. The worker runs separately from the web gateway. Neo does not infer
+that a memory was saved merely because it acknowledged something in chat. Check the Memory and
+Preferences panel to see what is actually stored.
+
+This fast path can still miss wording that its phrase check does not select. Existing conversations
+are not automatically backfilled. Embeddings are for fuzzy Organizer search, not for deciding whether
+an owner statement should become a profile memory.
+
 ## Quick start
 
 ### Requirements
@@ -133,8 +151,8 @@ cd N:\Programming\neo
 .\.venv\Scripts\python.exe -m apps.worker.main
 ~~~
 
-The gateway handles interactive chat. The worker handles durable reminder checks and future
-retryable/background jobs.
+The gateway handles interactive chat. The worker delivers reminders and retries captured memory
+candidates when the model provider was unavailable.
 
 ### Optional: render JavaScript-heavy public pages
 
